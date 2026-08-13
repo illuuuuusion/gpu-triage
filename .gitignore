@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+
+# Generated offline runtime bundle
+offline/packages/*.pkg.tar.*
+offline/packages/*.sig
+offline/SHA256SUMS
+offline/manifest.env
+offline/.bundle-root/
+
+# Diagnostic output
+reports/*
+!reports/.gitkeep
+
+# Local build/cache
+.cache/
+.tmp/
+*.iso
