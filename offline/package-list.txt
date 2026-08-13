@@ -1,0 +1,9 @@
+# Runtime packages installed into the official Arch live session.
+# Keep this list deliberately small. Dependencies are collected by build_bundle.sh.
+python
+pciutils
+vulkan-tools
+vulkan-radeon
+nvidia-open
+nvidia-utils
+memtest_vulkan
