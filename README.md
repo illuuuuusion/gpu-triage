@@ -1,46 +1,117 @@
-# gpu-triage MVP
+# gpu-triage
 
-Offline-first MVP für die Diagnose von **AMD Radeon RX 5000–9000** und **NVIDIA GeForce RTX 3000–5000** auf einem separaten Diagnose-PC.
+Offline-Diagnosewerkzeug für dedizierte Grafikkarten. gpu-triage sammelt auf einem
+separaten Diagnose-PC belastbare Belege zum Zustand einer GPU — PCI-Sichtbarkeit,
+Treiberbindung, PCIe-Link, Fehlerzähler, Telemetrie und ein begrenzter VRAM-Test —
+und schreibt daraus einen Text- und JSON-Report.
 
-Der Diagnose-PC braucht **kein Internet**. Ein einziger USB-Stick enthält:
+Der Diagnose-PC benötigt dabei **kein Internet**: Live-System, Anwendung, Pakete
+und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 
-1. ein **offizielles Arch-Linux-ISO** zum Booten via Ventoy,
-2. dieses Repository,
-3. ein vorbereitetes Offline-Paketbundle,
-4. die erzeugten Diagnose-Reports.
+- **Status:** v0.1 (MVP), siehe [ROADMAP.md](ROADMAP.md)
+- **Unterstützte Hardware:** AMD Radeon RX 5000–9000, NVIDIA GeForce RTX 3000–5000
+- **Plattform:** Arch Linux Live-System (offizielles ISO), Python 3 aus der Standardbibliothek
 
-Es wird **kein eigenes ArchISO gebaut**. Das Repo und das Live-Betriebssystem bleiben während der MVP-Entwicklung getrennt.
+## Inhalt
 
-## Repo-Struktur
+- [Funktionsumfang](#funktionsumfang)
+- [Nicht enthalten](#nicht-enthalten)
+- [Voraussetzungen](#voraussetzungen)
+- [Einrichtung](#einrichtung)
+- [Verwendung](#verwendung)
+- [Reports und Bewertung](#reports-und-bewertung)
+- [Konfiguration](#konfiguration)
+- [Projektstruktur](#projektstruktur)
+- [Entwicklung](#entwicklung)
+- [Designentscheidungen](#designentscheidungen)
+- [Lizenz](#lizenz)
+
+## Funktionsumfang
+
+v0.1 erhebt pro Zielkarte:
+
+| Bereich | Belege |
+| --- | --- |
+| Identität | PCI-Präsenz, Vendor/Device- und Subsystem-IDs, BDF, AMD/NVIDIA-Erkennung |
+| Treiber | gebundener Kernel-Treiber, DRM-Nodes |
+| Anbindung | PCIe Link Speed / Width, BAR-Ressourcen |
+| Fehler | PCIe-AER vor und nach Last, inklusive Upstream-Ports |
+| Telemetrie | AMD hwmon, NVIDIA `nvidia-smi` |
+| Kernel | Fehlersignale wie NVIDIA Xid oder amdgpu reset/timeout/fault |
+| VRAM | begrenzter Vulkan-Test über `memtest_vulkan` |
+| Ausgabe | Text- und JSON-Report auf dem USB-Stick |
+
+
+## Voraussetzungen
+
+**Diagnose-PC (offline)**
+
+- USB-Boot möglich, Secure Boot deaktiviert
+- Anzeige über Mainboard/iGPU; die zu prüfende dGPU ist ausschließlich Device Under Test
+- kein Netzwerk erforderlich
+
+**Vorbereitungs-PC**
+
+- Windows mit Git und PowerShell zum Synchronisieren des Sticks
+- ein internetfähiges Arch-System (VM oder WSL) zum Bauen des Offline-Bundles
+- USB-Stick mit [Ventoy](https://www.ventoy.net/) und ausreichend Platz für ISO, Repo und Pakete
+
+## Einrichtung
+
+Die Einrichtung erfolgt einmalig auf dem Vorbereitungs-PC. Es wird **kein eigenes
+ArchISO gebaut**; das Repository bleibt vom Live-System getrennt.
+
+### 1. Ventoy installieren
+
+Ventoy auf den USB-Stick installieren. Der Stick erhält dadurch eine große,
+normal beschreibbare Datenpartition mit dem Label `Ventoy`.
+
+### 2. Offizielles Arch-ISO herunterladen
 
 ```text
-gpu-triage/
-├── start.sh                    # einziger Einstiegspunkt auf dem Diagnose-PC
-├── app/
-│   └── gpu_diag.py             # Diagnose-Orchestrator
-├── scripts/
-│   ├── bootstrap.sh            # installiert Offline-Runtime + lädt Treiber
-│   └── start.sh                # ein Einstiegspunkt für den Diagnose-PC
-├── offline/
-│   ├── build_bundle.sh         # Internet-PC: erstellt Offline-Paketbundle
-│   ├── package-list.txt        # bewusst kleine Runtime-Paketliste
-│   ├── packages/               # generiert, nicht in Git
-│   ├── manifest.env            # generiert, bindet Bundle an Arch-ISO-Kernel
-│   └── SHA256SUMS              # generiert
-├── reports/                    # Reports auf demselben USB
-├── tests/
-│   └── test_gpu_diag.py        # Regressionstests, keine GPU erforderlich
-├── tools/
-│   └── sync-to-usb.ps1         # Windows: Repo + optional ISO auf Ventoy kopieren
-├── README.md
-└── ROADMAP.md
+archlinux-YYYY.MM.DD-x86_64.iso
 ```
 
-## Warum Ventoy statt Rufus/Balena für die Entwicklung?
+Den Dateinamen **nicht ändern** — das enthaltene Datum bestimmt, gegen welchen
+Snapshot das Offline-Bundle gebaut wird.
 
-Rufus/Balena sind ideal, wenn der Stick nur ein ISO abbilden soll. Für dieses Projekt soll **derselbe Stick** gleichzeitig booten, das häufig geänderte Git-Repo enthalten, Offline-Pakete bereitstellen und Reports zurücknehmen.
+### 3. Repository klonen
 
-Mit Ventoy bleibt die große Datenpartition normal beschreibbar:
+```bash
+git clone <repo-url> gpu-triage
+```
+
+### 4. Offline-Bundle bauen
+
+Auf dem internetfähigen Arch-System:
+
+```bash
+cd gpu-triage
+sudo bash ./offline/build_bundle.sh /pfad/zu/archlinux-YYYY.MM.DD-x86_64.iso
+```
+
+Das Skript nutzt den Arch Linux Archive Snapshot zum ISO-Datum, löst eine
+vollständige Dependency-Closure auf und erzeugt:
+
+```text
+offline/packages/*.pkg.tar.zst
+offline/manifest.env     # bindet das Bundle an die Kernelversion des ISOs
+offline/SHA256SUMS
+```
+
+Kernel- und Basisabhängigkeiten sind absichtlich enthalten. Ein reproduzierbarer
+Offline-Start wiegt hier schwerer als Speicherplatz.
+
+### 5. Stick synchronisieren
+
+In PowerShell aus dem Repo-Verzeichnis:
+
+```powershell
+.\tools\sync-to-usb.ps1 -Drive E: -IsoPath C:\Downloads\archlinux-YYYY.MM.DD-x86_64.iso
+```
+
+`-IsoPath` ist optional und nur beim ersten Mal bzw. nach einem ISO-Wechsel nötig.
+Ergebnis auf dem Stick:
 
 ```text
 VENTOY_USB/
@@ -53,198 +124,153 @@ VENTOY_USB/
     └── reports/
 ```
 
-Dadurch muss bei einer Änderung an `gpu_diag.py` nicht jedes Mal ein Live-ISO neu gebaut werden.
+> **ISO und Bundle gehören zusammen.** Arch ist Rolling Release, und `nvidia-open`
+> enthält Kernelmodule für eine konkrete Kernelversion. `bootstrap.sh` vergleicht
+> `manifest.env` vor jeder Installation mit `uname -r` und bricht bei Abweichung ab,
+> statt einen unpassenden NVIDIA-Stack zu installieren. Nach einem ISO-Update muss
+> `build_bundle.sh` erneut laufen.
 
-## Einmalige USB-Vorbereitung
+## Verwendung
 
-### 1. Ventoy auf einen USB-Stick installieren
-
-Das geschieht auf dem Windows-PC. Danach besitzt der Stick eine große Datenpartition mit dem Label `Ventoy`.
-
-### 2. Offizielles Arch-ISO herunterladen
-
-Beispielname:
-
-```text
-archlinux-2026.08.01-x86_64.iso
-```
-
-Den Dateinamen **nicht ändern**. Das Datum wird verwendet, um ein dazu passendes Offline-Paketbundle zu bauen.
-
-### 3. Repository klonen
-
-Auf dem Windows-PC normal über Git/GitHub.
-
-### 4. Offline-Bundle auf einem Internet-fähigen Arch-System bauen
-
-Das kann eine Arch-VM oder Arch unter WSL sein. Das Skript benötigt Internet nur auf diesem Entwicklungs-PC.
-
-```bash
-cd gpu-triage
-sudo bash ./offline/build_bundle.sh /pfad/zu/archlinux-2026.08.01-x86_64.iso
-```
-
-Das Skript verwendet den **Arch Linux Archive Snapshot vom Datum des ISOs**, lädt eine vollständige Dependency-Closure und erzeugt:
-
-```text
-offline/packages/*.pkg.tar.zst
-offline/manifest.env
-offline/SHA256SUMS
-```
-
-Das Bundle enthält bewusst auch Kernel-/Basisabhängigkeiten. Speicherplatz ist im MVP weniger wichtig als ein reproduzierbarer Offline-Start.
-
-### 5. Repo und ISO auf denselben Ventoy-Stick kopieren
-
-In PowerShell aus dem Repo:
-
-```powershell
-.\tools\sync-to-usb.ps1 -Drive E: -IsoPath C:\Downloads\archlinux-2026.08.01-x86_64.iso
-```
-
-Danach liegt alles auf **einem** Stick.
-
-## Diagnose-PC: komplett offline
-
-Empfohlen:
-
-- Monitor am Mainboard/iGPU,
-- dGPU ist ausschließlich das Device Under Test,
-- LAN/WLAN ist für die Diagnose nicht erforderlich.
-
-### Boot
-
-1. Vom Ventoy-Stick booten.
-2. Offizielles Arch-Linux-ISO auswählen.
-3. Im Arch-Root-Shell die Ventoy-Datenpartition mounten:
+Vom Ventoy-Stick booten, das offizielle Arch-ISO wählen und in der Root-Shell die
+Datenpartition mounten:
 
 ```bash
 mkdir -p /mnt/ventoy
 mount /dev/disk/by-label/Ventoy /mnt/ventoy
-```
-
-4. gpu-triage starten:
-
-```bash
 bash /mnt/ventoy/gpu-triage/start.sh
 ```
 
-`start.sh` führt für Diagnoseläufe automatisch `scripts/bootstrap.sh` aus. Dieses installiert Pakete **ausschließlich von USB** und startet danach die Diagnose-App.
+`start.sh` ist der einzige Einstiegspunkt und ruft bei Bedarf den Bootstrap auf.
 
-Direkte Befehle:
-
-```bash
-bash /mnt/ventoy/gpu-triage/start.sh list
-bash /mnt/ventoy/gpu-triage/start.sh quick --gpu 0000:03:00.0 --vram-seconds 60
-bash /mnt/ventoy/gpu-triage/start.sh quick --gpu 03:00.0 --no-vram
-```
-
-`--gpu` akzeptiert nur vollständige PCI-Adressen (`0000:03:00.0`) oder die Kurzform (`03:00.0`, wird auf Domain `0000` normalisiert). Teilangaben wie `1` werden abgelehnt, damit nie versehentlich die falsche Karte getestet wird.
-
-### Bootstrap läuft nur, wenn er gebraucht wird
-
-`list`, `selftest` und `--help` benötigen nur die Python-Standardbibliothek und starten direkt, ohne das Bundle zu prüfen oder Pakete zu installieren.
-
-Für Diagnoseläufe läuft der Bootstrap **einmal pro Live-Boot**. Nach Erfolg wird eine Marke unter `/run/gpu-triage/bootstrap.ok` abgelegt, die an Kernel, Mountpfad, `manifest.env` und `SHA256SUMS` gebunden ist. Weitere Läufe im selben Boot überspringen die SHA256-Prüfung und die Paketinstallation. `/run` ist tmpfs — auf dem USB-Stick bleibt nichts zurück. Ein Wechsel des Sticks oder ein neu gebautes Bundle entwertet die Marke automatisch; erzwingen lässt sich der Bootstrap mit `GPU_TRIAGE_FORCE_BOOTSTRAP=1`.
-
-## Wichtig: ISO und Offline-Bundle gehören zusammen
-
-Arch ist Rolling Release. Besonders das Paket `nvidia-open` enthält Kernelmodule für eine konkrete Arch-Kernelversion.
-
-Darum speichert `build_bundle.sh` die erwartete Kernelversion in `offline/manifest.env`. `bootstrap.sh` vergleicht sie vor jeder Installation mit:
+### Befehle
 
 ```bash
-uname -r
+start.sh list                                        # verfügbare GPUs auflisten
+start.sh quick --gpu 0000:03:00.0                    # Diagnose mit VRAM-Test (60 s)
+start.sh quick --gpu 03:00.0 --vram-seconds 120      # längerer VRAM-Test
+start.sh quick --gpu 03:00.0 --no-vram               # nur Probe, keine VRAM-Last
+start.sh quick --gpu 03:00.0 --report-dir /mnt/...   # abweichendes Reportverzeichnis
+start.sh selftest                                    # Parser-Smoketests
+start.sh --help
 ```
 
-Bei einem Mismatch wird **abgebrochen**, statt einen potenziell falschen NVIDIA-Stack zu installieren.
+`--gpu` akzeptiert ausschließlich vollständige PCI-Adressen (`0000:03:00.0`) oder
+die Kurzform (`03:00.0`, wird auf Domain `0000` normalisiert). Teilangaben wie `1`
+werden abgelehnt, damit nie versehentlich die falsche Karte getestet wird.
 
-Wenn das Arch-ISO aktualisiert wird, wird auch das Offline-Bundle neu gebaut.
+### Bootstrap
 
-## Was v0.1 diagnostiziert
+Der Bootstrap installiert Pakete **ausschließlich vom USB-Stick** und läuft nur,
+wenn er gebraucht wird:
 
-- PCI-Präsenz und GPU-Identität
-- AMD/NVIDIA-Erkennung
-- PCI Device/Subsystem IDs und BDF
-- Kernel-Treiberbindung
-- DRM Nodes
-- PCIe Link Speed / Width
-- BAR-Ressourcen
-- PCIe-AER vor/nach Last, inklusive Upstream-Ports
-- AMD hwmon-Telemetrie
-- NVIDIA `nvidia-smi`-Telemetrie
-- Kernel-Fehlersignale wie NVIDIA Xid oder amdgpu reset/timeout/fault
-- begrenzter Vulkan-VRAM-Test über `memtest_vulkan`
-- Text- und JSON-Report
+- `list`, `selftest` und `--help` benötigen nur die Python-Standardbibliothek und
+  starten sofort, ohne Bundle-Prüfung oder Paketinstallation.
+- Für Diagnoseläufe läuft der Bootstrap **einmal pro Live-Boot**. Danach liegt unter
+  `/run/gpu-triage/bootstrap.ok` eine Marke, die an Kernel, Mountpfad, `manifest.env`
+  und `SHA256SUMS` gebunden ist; weitere Läufe überspringen Prüfsummen und
+  Installation. `/run` ist tmpfs — auf dem Stick bleibt nichts zurück.
+- Ein anderer Stick oder ein neu gebautes Bundle entwertet die Marke automatisch.
+  Erzwingen lässt sie sich mit `GPU_TRIAGE_FORCE_BOOTSTRAP=1`.
 
-Reports landen standardmäßig unter:
+## Reports und Bewertung
+
+Reports landen standardmäßig in `reports/` — also auf demselben USB-Stick — als
+Text- und JSON-Datei.
+
+`PASS` wird nur vergeben, wenn alle wesentlichen Tests tatsächlich gelaufen sind.
+Ein mit `--no-vram` übersprungener oder mangels `memtest_vulkan` nicht ausführbarer
+VRAM-Test ergibt `WARN`, nie `PASS`. Auch ein `PASS` bedeutet lediglich: Die aktuell
+implementierten Tests haben keinen Fehler gefunden — es ist keine Garantie für eine
+vollständig gesunde GPU.
+
+Die Diagnose folgt einer festen Kette, in der ein defekter Zustand ein Ergebnis ist
+und kein Programmfehler:
 
 ```text
-gpu-triage/reports/
+PCI sichtbar? → Treiber gebunden? → Vulkan verfügbar? → VRAM-Test ausführbar?
+             → AER / Kernel / Datenfehler unter Last?
 ```
 
-also auf **demselben USB-Stick**.
+## Konfiguration
 
-`PASS` wird nur vergeben, wenn alle wesentlichen Tests tatsächlich gelaufen sind. Ein mit `--no-vram` übersprungener oder mangels `memtest_vulkan` nicht ausführbarer VRAM-Test ergibt `WARN`, nie `PASS`.
+| Variable | Wirkung |
+| --- | --- |
+| `GPU_TRIAGE_FORCE_BOOTSTRAP` | `1` erzwingt einen vollständigen Bootstrap trotz gültiger Marke |
+| `GPU_TRIAGE_MEMTEST` | Pfad zu einer abweichenden `memtest_vulkan`-Binary (sonst über `PATH`) |
+| `GPU_TRIAGE_REPORT_DIR` | Zielverzeichnis für Reports (entspricht `--report-dir`) |
+| `GPU_TRIAGE_REPO_ROOT` | Repo-Wurzel; wird von `start.sh` gesetzt |
 
-`memtest_vulkan` kommt aus dem Offline-Paketbundle und wird über `PATH` gefunden. Für Ad-hoc-Läufe lässt sich ein anderer Pfad über `GPU_TRIAGE_MEMTEST=/pfad/zu/memtest_vulkan` setzen.
-
-## Sicherheitsgrenzen des MVP
-
-Nicht enthalten:
-
-- `/dev/mem`
-- rohe MMIO/Register-Schreibzugriffe
-- VBIOS-Flashing
-- Overclocking
-- Power-/Spannungsänderungen
-- Fan-Control
-- exakte physische VRAM-Chip-Zuordnung
-
-Der NVIDIA-Bootstrap kann eine **nicht als Boot-GPU verwendete NVIDIA-dGPU** von `nouveau` lösen und anschließend den vorbereiteten `nvidia-open`-Treiber laden. Darum ist die zusätzliche iGPU Bestandteil des vorgesehenen Testaufbaus.
-
-## Tests
-
-Die Regressionstests brauchen keine echte GPU; sie bauen Fake-sysfs-Bäume in temporären Verzeichnissen und nutzen nur die Standardbibliothek:
-
-```bash
-python3 -m unittest discover -s tests -v
-python3 app/gpu_diag.py selftest
-```
-
-## GitHub-Workflow
-
-Das GitHub-Repo ist die Source of Truth:
+## Projektstruktur
 
 ```text
-Windows-PC
-  edit / test / commit / push
-        ↓
-offline bundle bei Bedarf neu bauen
-        ↓
+gpu-triage/
+├── start.sh                    # Einstiegspunkt auf dem Diagnose-PC
+├── app/
+│   └── gpu_diag.py             # Diagnose-Orchestrator
+├── scripts/
+│   ├── start.sh                # Argument-Routing, Rechte, Bootstrap-Aufruf
+│   └── bootstrap.sh            # Offline-Runtime installieren, Treiber laden
+├── offline/
+│   ├── build_bundle.sh         # baut das Offline-Paketbundle (Internet-PC)
+│   ├── package-list.txt        # bewusst kleine Runtime-Paketliste
+│   ├── packages/               # generiert, nicht in Git
+│   ├── manifest.env            # generiert, bindet Bundle an ISO-Kernel
+│   └── SHA256SUMS              # generiert
+├── tools/
+│   └── sync-to-usb.ps1         # Windows: Repo und ISO auf den Ventoy-Stick
+├── tests/                      # Regressionstests, keine GPU erforderlich
+├── reports/                    # Reportausgabe auf demselben USB-Stick
+├── README.md
+└── ROADMAP.md
+```
+
+## Entwicklung
+
+Das GitHub-Repo ist die Source of Truth; der USB-Stick ist eine Kopie davon:
+
+```text
+Entwicklungs-PC (edit / test / commit / push)
+        ↓  Offline-Bundle nur bei Bedarf neu bauen
 sync-to-usb.ps1
         ↓
-Diagnose-PC offline
+Diagnose-PC (offline)
         ↓
 reports/ zurück auf demselben Stick
 ```
 
-Eine reine Python-/Dokumentationsänderung benötigt **kein neues Arch-ISO und normalerweise kein neues Offline-Bundle**. Nur wenn sich Runtime-Pakete oder das verwendete Arch-ISO ändern, muss `build_bundle.sh` erneut laufen.
+Reine Python- oder Dokumentationsänderungen brauchen **kein neues Arch-ISO und
+kein neues Offline-Bundle**. `build_bundle.sh` muss nur erneut laufen, wenn sich
+Runtime-Pakete oder das verwendete Arch-ISO ändern.
 
-## MVP-Philosophie
+### Tests
 
-Ein defekter Zustand ist ein Ergebnis, kein Programmfehler:
+Die Regressionstests benötigen keine echte GPU. Sie bauen Fake-sysfs-Bäume in
+temporären Verzeichnissen und nutzen ausschließlich die Standardbibliothek:
 
-```text
-PCI sichtbar?
-  ↓
-Treiber gebunden?
-  ↓
-Vulkan verfügbar?
-  ↓
-VRAM-Test ausführbar?
-  ↓
-AER / Kernel / Datenfehler unter Last?
+```bash
+python3 -m unittest discover -s tests -v
+python3 app/gpu_diag.py selftest
+bash tests/test_bootstrap_stamp.sh
 ```
 
-`PASS` bedeutet nur: Die aktuell implementierten Tests haben keinen Fehler gefunden. Es ist keine Garantie für eine vollständig gesunde GPU.
+## Designentscheidungen
+
+**Ventoy statt Rufus/Balena.** Rufus und Balena eignen sich, wenn ein Stick genau
+ein ISO abbilden soll. Hier muss derselbe Stick gleichzeitig booten, ein häufig
+geändertes Git-Repo tragen, Offline-Pakete bereitstellen und Reports zurückführen.
+Ventoy lässt die Datenpartition normal beschreibbar — eine Änderung an
+`gpu_diag.py` erfordert damit kein neu gebautes Live-ISO.
+
+**Repo getrennt vom Live-System.** Solange das Repo nicht in ein eigenes ISO
+eingebacken wird, bleiben Entwicklungs- und Boot-Zyklus unabhängig voneinander.
+Ein eigenes gpu-triage-Live-ISO ist als späteres Release-Artefakt vorgesehen.
+
+**Abbrechen statt raten.** Passt das Bundle nicht zum laufenden Kernel, bricht der
+Bootstrap ab. Ein nicht durchgeführter Test wird als `WARN` ausgewiesen und nie
+als Erfolg gewertet.
+
+## Lizenz
+
+Für dieses Repository ist derzeit keine Lizenz hinterlegt. Alle Rechte vorbehalten,
+bis eine Lizenzdatei ergänzt wird.
