@@ -151,7 +151,6 @@ start.sh quick --gpu 0000:03:00.0                    # Diagnose mit VRAM-Test (6
 start.sh quick --gpu 03:00.0 --vram-seconds 120      # längerer VRAM-Test
 start.sh quick --gpu 03:00.0 --no-vram               # nur Probe, keine VRAM-Last
 start.sh quick --gpu 03:00.0 --report-dir /mnt/...   # abweichendes Reportverzeichnis
-start.sh selftest                                    # Parser-Smoketests
 start.sh --help
 ```
 
@@ -164,8 +163,8 @@ werden abgelehnt, damit nie versehentlich die falsche Karte getestet wird.
 Der Bootstrap installiert Pakete **ausschließlich vom USB-Stick** und läuft nur,
 wenn er gebraucht wird:
 
-- `list`, `selftest` und `--help` benötigen nur die Python-Standardbibliothek und
-  starten sofort, ohne Bundle-Prüfung oder Paketinstallation.
+- `list` und `--help` benötigen nur die Python-Standardbibliothek und starten
+  sofort, ohne Bundle-Prüfung oder Paketinstallation.
 - Für Diagnoseläufe läuft der Bootstrap **einmal pro Live-Boot**. Danach liegt unter
   `/run/gpu-triage/bootstrap.ok` eine Marke, die an Kernel, Mountpfad, `manifest.env`
   und `SHA256SUMS` gebunden ist; weitere Läufe überspringen Prüfsummen und
@@ -199,17 +198,15 @@ PCI sichtbar? → Treiber gebunden? → Vulkan verfügbar? → VRAM-Test ausfüh
 | `GPU_TRIAGE_FORCE_BOOTSTRAP` | `1` erzwingt einen vollständigen Bootstrap trotz gültiger Marke |
 | `GPU_TRIAGE_MEMTEST` | Pfad zu einer abweichenden `memtest_vulkan`-Binary (sonst über `PATH`) |
 | `GPU_TRIAGE_REPORT_DIR` | Zielverzeichnis für Reports (entspricht `--report-dir`) |
-| `GPU_TRIAGE_REPO_ROOT` | Repo-Wurzel; wird von `start.sh` gesetzt |
 
 ## Projektstruktur
 
 ```text
 gpu-triage/
-├── start.sh                    # Einstiegspunkt auf dem Diagnose-PC
+├── start.sh                    # Einstiegspunkt: Routing, Rechte, Bootstrap-Aufruf
 ├── app/
 │   └── gpu_diag.py             # Diagnose-Orchestrator
 ├── scripts/
-│   ├── start.sh                # Argument-Routing, Rechte, Bootstrap-Aufruf
 │   └── bootstrap.sh            # Offline-Runtime installieren, Treiber laden
 ├── offline/
 │   ├── build_bundle.sh         # baut das Offline-Paketbundle (Internet-PC)
@@ -250,7 +247,6 @@ temporären Verzeichnissen und nutzen ausschließlich die Standardbibliothek:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 app/gpu_diag.py selftest
 bash tests/test_bootstrap_stamp.sh
 ```
 

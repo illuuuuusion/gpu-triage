@@ -41,7 +41,7 @@ id_for() {
 }
 
 BASE="$(id_for "$TMP/a")"
-check "id is a sha256 hex digest" "$(printf '%s' "$BASE" | wc -c)" "64"
+check "id is a sha256 hex digest" "${#BASE}" "64"
 
 check "identical bundle yields identical id" "$(id_for "$TMP/a")" "$BASE"
 
@@ -68,7 +68,7 @@ CHANGED_SUMS="$(id_for "$TMP/a")"
 # Missing files must not crash the helper.
 rm -f "$TMP/a/offline/manifest.env" "$TMP/a/offline/SHA256SUMS"
 MISSING="$(id_for "$TMP/a")"
-check "missing manifest/sums still produce a digest" "$(printf '%s' "$MISSING" | wc -c)" "64"
+check "missing manifest/sums still produce a digest" "${#MISSING}" "64"
 
 # The stamp must live on tmpfs, never on the USB stick.
 grep -q '^STAMP_DIR="/run/gpu-triage"' "$BOOTSTRAP" \

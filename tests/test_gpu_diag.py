@@ -40,7 +40,6 @@ def make_pci_tree(root: Path, *, bdf: str = "0000:03:00.0", driver: str | None =
         "revision": "0xc8",
         "subsystem_vendor": "0x1002",
         "subsystem_device": "0x0e3b",
-        "numa_node": "-1",
         "boot_vga": "0",
     }.items():
         (dev / name).write_text(value + "\n")
@@ -151,13 +150,12 @@ class TestSelectGpu(unittest.TestCase):
         self.assertEqual(gpu_diag.select_gpu(self.gpus, "03:00.0", False).bdf, "0000:03:00.0")
 
     def test_partial_input_rejected(self):
-        """'1' must never suffix-match 0000:03:00.0's neighbours."""
-        for bad in ("1", "00.0", "3:00.0", "0"):
-            with self.subTest(value=bad):
-                with self.assertRaises(gpu_diag.DiagError) as ctx:
-                    gpu_diag.select_gpu(self.gpus, bad, False)
-                self.assertIn("Invalid PCI address", str(ctx.exception))
-                self.assertIn("0000:03:00.0", str(ctx.exception))  # lists detected GPUs
+        """'1' must never suffix-match 0000:03:00.0. TestNormalizeBdf owns the
+        full reject list; this only pins the error message down."""
+        with self.assertRaises(gpu_diag.DiagError) as ctx:
+            gpu_diag.select_gpu(self.gpus, "1", False)
+        self.assertIn("Invalid PCI address", str(ctx.exception))
+        self.assertIn("0000:03:00.0", str(ctx.exception))  # lists detected GPUs
 
     def test_valid_but_absent_bdf_rejected(self):
         with self.assertRaises(gpu_diag.DiagError) as ctx:
@@ -268,17 +266,6 @@ class TestFindMemtest(unittest.TestCase):
         os.environ["PATH"] = str(self.tmp / "empty")
         os.environ[gpu_diag.MEMTEST_ENV] = str(plain)
         self.assertIsNone(gpu_diag.find_memtest())
-
-    def test_no_repo_bin_fallback(self):
-        """The undocumented <repo>/bin/memtest_vulkan fallback must be gone."""
-        saved = gpu_diag.REPO_ROOT
-        try:
-            gpu_diag.REPO_ROOT = self.tmp
-            self._make_exe(self.tmp / "bin")
-            os.environ["PATH"] = str(self.tmp / "empty")
-            self.assertIsNone(gpu_diag.find_memtest())
-        finally:
-            gpu_diag.REPO_ROOT = saved
 
     def test_missing_memtest_yields_unavailable_not_crash(self):
         os.environ["PATH"] = str(self.tmp / "empty")

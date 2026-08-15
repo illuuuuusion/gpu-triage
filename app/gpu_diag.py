@@ -40,8 +40,7 @@ DISPLAY_CLASSES = {0x030000, 0x030200, 0x038000}
 VENDORS = {0x1002: "AMD", 0x10DE: "NVIDIA", 0x8086: "Intel"}
 AER_FILES = ("aer_dev_correctable", "aer_dev_nonfatal", "aer_dev_fatal")
 MEMTEST_ENV = "GPU_TRIAGE_MEMTEST"
-APP_DIR = Path(__file__).resolve().parent
-REPO_ROOT = APP_DIR.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass
@@ -56,7 +55,6 @@ class GPU:
     vendor: str
     driver: str | None
     boot_vga: bool
-    numa_node: int | None
 
 
 class DiagError(RuntimeError):
@@ -70,28 +68,15 @@ def read_text(path: Path) -> str | None:
         return None
 
 
-def read_hex(path: Path) -> int | None:
+def read_num(path: Path, base: int = 10) -> int | None:
+    """Read a sysfs integer. base=16 also accepts the usual '0x' prefix."""
     value = read_text(path)
     if value is None:
         return None
     try:
-        return int(value, 16)
+        return int(value, base)
     except ValueError:
         return None
-
-
-def read_int(path: Path) -> int | None:
-    value = read_text(path)
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def command_exists(name: str) -> bool:
-    return shutil.which(name) is not None
 
 
 def read_driver_name(dev: Path) -> str | None:
@@ -167,9 +152,9 @@ def enumerate_gpus(include_intel: bool = False) -> list[GPU]:
     if not SYS_PCI.exists():
         return result
     for dev in sorted(SYS_PCI.iterdir()):
-        vendor = read_hex(dev / "vendor")
-        device = read_hex(dev / "device")
-        cls = read_hex(dev / "class")
+        vendor = read_num(dev / "vendor", 16)
+        device = read_num(dev / "device", 16)
+        cls = read_num(dev / "class", 16)
         if vendor is None or device is None or cls is None:
             continue
         base_class = cls & 0xFFFF00
@@ -178,31 +163,21 @@ def enumerate_gpus(include_intel: bool = False) -> list[GPU]:
         if vendor not in (0x1002, 0x10DE) and not (include_intel and vendor == 0x8086):
             continue
         driver = read_driver_name(dev)
-        numa = read_int(dev / "numa_node")
         result.append(
             GPU(
                 bdf=dev.name,
                 vendor_id=vendor,
                 device_id=device,
                 class_code=cls,
-                revision=read_hex(dev / "revision"),
-                subsystem_vendor_id=read_hex(dev / "subsystem_vendor"),
-                subsystem_device_id=read_hex(dev / "subsystem_device"),
+                revision=read_num(dev / "revision", 16),
+                subsystem_vendor_id=read_num(dev / "subsystem_vendor", 16),
+                subsystem_device_id=read_num(dev / "subsystem_device", 16),
                 vendor=VENDORS.get(vendor, f"0x{vendor:04x}"),
                 driver=driver,
-                boot_vga=(read_int(dev / "boot_vga") == 1),
-                numa_node=None if numa == -1 else numa,
+                boot_vga=(read_num(dev / "boot_vga") == 1),
             )
         )
     return result
-
-
-def pci_description(bdf: str) -> str | None:
-    if not command_exists("lspci"):
-        return None
-    r = run(["lspci", "-D", "-s", bdf, "-nn"], timeout=5)
-    text = r.get("output", "").strip()
-    return text or None
 
 
 def pci_resource_bars(bdf: str) -> list[dict[str, Any]]:
@@ -230,9 +205,17 @@ def pci_link_info(bdf: str) -> dict[str, Any]:
     keys = ("current_link_speed", "current_link_width", "max_link_speed", "max_link_width")
     data = {k: read_text(root / k) for k in keys}
     # lspci is useful evidence and a fallback for kernels without all sysfs link fields.
-    if command_exists("lspci"):
-        data["lspci"] = run(["lspci", "-D", "-s", bdf, "-vv"], timeout=8)["output"]
+    # -nn keeps the numeric vendor/device IDs in the header line, which is also the
+    # human-readable device description used by the text report.
+    if shutil.which("lspci"):
+        data["lspci"] = run(["lspci", "-D", "-s", bdf, "-nn", "-vv"], timeout=8)["output"]
     return data
+
+
+def pci_description(link: dict[str, Any]) -> str | None:
+    """First line of the lspci -vv block: '0000:03:00.0 VGA ... [1002:744c] (rev c8)'."""
+    head = (link.get("lspci") or "").strip().splitlines()
+    return head[0].strip() if head else None
 
 
 def pci_chain(bdf: str) -> list[str]:
@@ -270,7 +253,7 @@ def aer_snapshot(bdf: str) -> dict[str, Any]:
                 per_dev[name] = parsed
         # Root ports may expose aggregate counters too.
         for name in ("aer_rootport_total_err_cor", "aer_rootport_total_err_nonfatal", "aer_rootport_total_err_fatal"):
-            val = read_int(root / name)
+            val = read_num(root / name)
             if val is not None:
                 per_dev[name] = val
         if per_dev:
@@ -340,7 +323,7 @@ def amd_hwmon(bdf: str) -> dict[str, Any]:
 
 
 def nvidia_telemetry(bdf: str) -> dict[str, Any]:
-    if not command_exists("nvidia-smi"):
+    if not shutil.which("nvidia-smi"):
         return {"available": False, "reason": "nvidia-smi not found"}
     fields = [
         "pci.bus_id",
@@ -371,11 +354,11 @@ def nvidia_telemetry(bdf: str) -> dict[str, Any]:
 
 
 def kernel_log() -> str:
-    if command_exists("journalctl"):
+    if shutil.which("journalctl"):
         r = run(["journalctl", "-k", "-b", "--no-pager"], timeout=15)
         if r.get("rc") == 0 and r.get("output"):
             return r["output"]
-    if command_exists("dmesg"):
+    if shutil.which("dmesg"):
         return run(["dmesg", "--color=never"], timeout=10).get("output", "")
     return ""
 
@@ -456,7 +439,7 @@ def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[st
     cmd = [exe]
     env = os.environ.copy()
     # Prefer only the relevant vendor ICD when well-known paths exist. This reduces accidental iGPU selection.
-    vendor = read_hex(SYS_PCI / target_bdf / "vendor")
+    vendor = read_num(SYS_PCI / target_bdf / "vendor", 16)
     icd_candidates: list[str] = []
     if vendor == 0x10DE:
         icd_candidates = ["/usr/share/vulkan/icd.d/nvidia_icd.json"]
@@ -610,72 +593,27 @@ def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[st
     }
 
 
-def mount_report_media() -> Path | None:
-    # Ventoy's data partition normally has label 'Ventoy'. A custom GPUTRIAGE label is also accepted.
-    for label in ("GPUTRIAGE", "Ventoy"):
-        dev = Path("/dev/disk/by-label") / label
-        if not dev.exists():
-            continue
-        # Already mounted?
-        if command_exists("findmnt"):
-            r = run(["findmnt", "-rn", "-S", str(dev), "-o", "TARGET"], timeout=3)
-            target = r.get("output", "").strip()
-            if target:
-                p = Path(target) / "GPU-TRIAGE-REPORTS"
-                try:
-                    p.mkdir(exist_ok=True)
-                    if os.access(p, os.W_OK):
-                        return p
-                except OSError:
-                    pass
-        if os.geteuid() == 0 and command_exists("mount"):
-            mountpoint = Path("/mnt") / label.lower()
-            mountpoint.mkdir(parents=True, exist_ok=True)
-            r = run(["mount", "-o", "rw", str(dev), str(mountpoint)], timeout=10)
-            if r.get("rc") == 0:
-                p = mountpoint / "GPU-TRIAGE-REPORTS"
-                try:
-                    p.mkdir(exist_ok=True)
-                    return p
-                except OSError:
-                    pass
-    return None
-
-
 def choose_report_dir(explicit: str | None) -> Path:
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    # start.sh sets this to <repo>/reports on the writable USB partition.
-    # Keeping it as an environment variable lets the Python app remain usable
-    # outside the repository and preserves the old media auto-detection fallback.
-    env_dir = os.environ.get("GPU_TRIAGE_REPORT_DIR")
-    if env_dir:
-        p = Path(env_dir).expanduser().resolve()
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    media = mount_report_media()
-    if media:
-        return media
-    p = Path("/root/gpu-triage-reports") if os.geteuid() == 0 else Path.cwd() / "gpu-triage-reports"
+    # start.sh sets GPU_TRIAGE_REPORT_DIR to <repo>/reports on the writable USB
+    # partition; --gpu-less direct invocations fall back to the working directory.
+    target = explicit or os.environ.get("GPU_TRIAGE_REPORT_DIR")
+    p = Path(target).expanduser().resolve() if target else Path.cwd() / "gpu-triage-reports"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def basic_probe(gpu: GPU) -> dict[str, Any]:
     dev = SYS_PCI / gpu.bdf
+    link = pci_link_info(gpu.bdf)
     return {
         "gpu": asdict(gpu),
-        "description": pci_description(gpu.bdf),
+        "description": pci_description(link),
         "driver_bound": gpu.driver is not None,
         "drm_nodes": drm_nodes_for_bdf(gpu.bdf),
-        "link": pci_link_info(gpu.bdf),
+        "link": link,
         "bars": pci_resource_bars(gpu.bdf),
         "power_state": read_text(dev / "power_state"),
-        "enable": read_int(dev / "enable"),
+        "enable": read_num(dev / "enable"),
         "rom_present": (dev / "rom").exists(),
         "pci_chain": pci_chain(gpu.bdf),
     }
@@ -754,13 +692,12 @@ def classify(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def human_size(n: int) -> str:
-    units = ["B", "KiB", "MiB", "GiB", "TiB"]
     x = float(n)
-    for u in units:
-        if x < 1024 or u == units[-1]:
+    for u in ("B", "KiB", "MiB", "GiB"):
+        if x < 1024:
             return f"{x:.1f} {u}"
         x /= 1024
-    return f"{n} B"
+    return f"{x:.1f} TiB"
 
 
 def text_report(report: dict[str, Any]) -> str:
@@ -861,8 +798,9 @@ def list_gpus() -> int:
     if not gpus:
         print("No display-class PCI GPUs found.")
         return 2
-    for g in gpus:
-        print(f"{g.bdf} vendor={g.vendor:<6} device=0x{g.device_id:04x} driver={g.driver or '-':<12} boot_vga={int(g.boot_vga)}")
+    for i, g in enumerate(gpus, 1):
+        role = "boot/display" if g.boot_vga else "test candidate"
+        print(f"{i}) {g.bdf} {g.vendor:<6} device=0x{g.device_id:04x} driver={g.driver or '-':<12} [{role}]")
     return 0
 
 
@@ -915,7 +853,7 @@ def run_quick(args: argparse.Namespace, interactive: bool = False) -> int:
             "uname": run(["uname", "-a"], 3).get("output", "").strip(),
             "cmdline": read_text(Path("/proc/cmdline")),
             "python": sys.version,
-            "repo_root": os.environ.get("GPU_TRIAGE_REPO_ROOT", str(REPO_ROOT)),
+            "repo_root": str(REPO_ROOT),
         },
     }
     report["classification"] = classify(report)
@@ -934,37 +872,18 @@ def run_quick(args: argparse.Namespace, interactive: bool = False) -> int:
     return 0 if report["classification"]["overall"] == "PASS" else 1
 
 
-def interactive_main() -> int:
+def interactive_main(parser: argparse.ArgumentParser) -> int:
     print("gpu-triage MVP - offline consumer GPU diagnostics")
     print("This test stresses the selected GPU through normal drivers. It does NOT use /dev/mem.")
     print()
-    gpus = enumerate_gpus(include_intel=True)
-    if not gpus:
-        print("No GPU found in PCI sysfs.")
+    if list_gpus() != 0:
         return 2
-    for i, g in enumerate(gpus, 1):
-        role = "boot/display" if g.boot_vga else "test candidate"
-        print(f"{i}) {g.bdf} {g.vendor} 0x{g.device_id:04x} driver={g.driver or '-'} [{role}]")
     print()
     print("Quick MVP performs PCI/AER + telemetry + bounded Vulkan VRAM test.")
-    answer = input("Run QUICK diagnostic? [y/N] ").strip().lower()
-    if answer not in ("y", "yes", "j", "ja"):
+    if input("Run QUICK diagnostic? [y/N] ").strip().lower() not in ("y", "yes", "j", "ja"):
         return 0
-    p = argparse.Namespace(gpu=None, report_dir=None, vram_seconds=60, no_vram=False)
-    return run_quick(p, interactive=True)
-
-
-def selftest() -> int:
-    assert parse_aer_file("Receiver Error 2\nBad TLP 0\nTOTAL_ERR_COR 2\n")["TOTAL_ERR_COR"] == 2
-    assert parse_memtest_device("1: Bus=0x01:00 DevId=0x2204   24GB NVIDIA GeForce RTX 3090") == (1, "0000:01:00.0")
-    d = numeric_delta({"a": {"x": 1}}, {"a": {"x": 4}})
-    assert d == {"a": {"x": 3}}
-    assert normalize_bdf("0000:03:00.0") == "0000:03:00.0"
-    assert normalize_bdf("03:00.0") == "0000:03:00.0"
-    assert normalize_bdf("1") is None
-    assert normalize_bdf("00.0") is None
-    print("selftest: PASS")
-    return 0
+    # Defaults come from the parser itself, so they cannot drift from the CLI.
+    return run_quick(parser.parse_args(["quick"]), interactive=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -976,7 +895,6 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--vram-seconds", type=int, default=60, help="bounded memtest_vulkan duration (default: 60)")
     q.add_argument("--no-vram", action="store_true", help="probe only; do not stress VRAM")
     q.add_argument("--report-dir", help="explicit writable report directory")
-    sub.add_parser("selftest", help="run parser/unit smoke tests")
     return p
 
 
@@ -985,15 +903,13 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command is None:
-            return interactive_main()
+            return interactive_main(parser)
         if args.command == "list":
             return list_gpus()
         if args.command == "quick":
             if args.vram_seconds < 5 or args.vram_seconds > 3600:
                 raise DiagError("--vram-seconds must be between 5 and 3600")
             return run_quick(args)
-        if args.command == "selftest":
-            return selftest()
         parser.error("unknown command")
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)
