@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "generated": "2026-08-16T20:03:52Z",
+  "iso_date": "2026.08.01",
+  "iso_name": "archlinux-2026.08.01-x86_64.iso",
+  "iso_sha256": "4e82dced1c4fd3e498b22a853f8db2a4d262d32b97e7e07d97390d9e425ffe5e",
+  "iso_size": 1597014016,
+  "iso_urls": [
+    "https://geo.mirror.pkgbuild.com/iso/2026.08.01/archlinux-2026.08.01-x86_64.iso",
+    "https://archive.archlinux.org/iso/2026.08.01/archlinux-2026.08.01-x86_64.iso"
+  ],
+  "expected_kernel": "7.1.5-arch1-2",
+  "release_tag": "bundle-2026.08.01",
+  "bundle_name": "gpu-triage-bundle-2026.08.01.zip",
+  "bundle_url": "https://github.com/illuuuuusion/gpu-triage/releases/download/bundle-2026.08.01/gpu-triage-bundle-2026.08.01.zip",
+  "bundle_sha256": "47721b1cf2b15c2e6b541e47dc42b6419b3afd467887932a0c2b62261bb544ce",
+  "bundle_size": 389537369,
+  "bundle_packages": 25
+}
