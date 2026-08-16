@@ -1,0 +1,217 @@
+name: Offline-Bundle bauen
+
+# Builds the offline package bundle for the current official Arch ISO, publishes
+# it as a release asset and opens a PR that updates offline/release.json.
+#
+# This is what removes the Linux requirement from the preparation PC: nobody has
+# to run build_bundle.sh by hand any more. The build itself happens in an
+# unmodified archlinux container started from the Ubuntu runner, so the runner
+# keeps its own toolchain (git, gh, python3) while pacman gets the Arch userland
+# it needs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_version:
+        description: 'Arch ISO version (YYYY.MM.DD) or "latest"'
+        required: false
+        default: latest
+      force:
+        description: 'Rebuild even if the release already exists'
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    # Arch publishes a new ISO on the first of the month; look a day later.
+    - cron: '0 6 2 * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: offline-bundle
+  cancel-in-progress: false
+
+# The default run shell is 'bash -e' *without* pipefail, which would let a
+# failing release_meta.py slip through the 'tee' into $GITHUB_OUTPUT and start a
+# build with empty ISO metadata. Naming bash explicitly adds -o pipefail.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve:
+    name: ISO-Release bestimmen
+    runs-on: ubuntu-latest
+    outputs:
+      iso_date: ${{ steps.iso.outputs.ISO_DATE }}
+      iso_name: ${{ steps.iso.outputs.ISO_NAME }}
+      iso_sha256: ${{ steps.iso.outputs.ISO_SHA256 }}
+      iso_url: ${{ steps.iso.outputs.ISO_URL }}
+      iso_url_archive: ${{ steps.iso.outputs.ISO_URL_ARCHIVE }}
+      release_tag: ${{ steps.iso.outputs.RELEASE_TAG }}
+      build: ${{ steps.gate.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads https://archlinux.org/releng/releases/json/ and cross-checks the
+      # ISO hash against the official sha256sums.txt. No scraping, no guessing
+      # of the filename.
+      - name: ISO-Metadaten aufloesen
+        id: iso
+        run: |
+          python3 offline/release_meta.py iso "${{ inputs.iso_version || 'latest' }}" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Vorhandenes Release pruefen
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.iso.outputs.RELEASE_TAG }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE" != "true" ] && gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists already — nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Bundle bauen und veroeffentlichen
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    env:
+      ISO_DATE: ${{ needs.resolve.outputs.iso_date }}
+      ISO_NAME: ${{ needs.resolve.outputs.iso_name }}
+      ISO_SHA256: ${{ needs.resolve.outputs.iso_sha256 }}
+      ISO_URL: ${{ needs.resolve.outputs.iso_url }}
+      ISO_URL_ARCHIVE: ${{ needs.resolve.outputs.iso_url_archive }}
+      TAG: ${{ needs.resolve.outputs.release_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The ISO hash comes from the two official sources that job 'resolve'
+      # already made agree, so checking the download against it is the check
+      # against sha256sums.txt.
+      - name: ISO laden und pruefen
+        run: |
+          mkdir -p "$RUNNER_TEMP/iso"
+          cd "$RUNNER_TEMP/iso"
+          curl -fL --retry 3 --retry-delay 5 -o "$ISO_NAME" "$ISO_URL" \
+            || curl -fL --retry 3 --retry-delay 5 -o "$ISO_NAME" "$ISO_URL_ARCHIVE"
+          echo "$ISO_SHA256  $ISO_NAME" | sha256sum -c -
+
+      # An unmodified archlinux image, no --privileged: build_bundle.sh needs
+      # neither pacstrap nor a chroot since phase 1. GPU_TRIAGE_OWNER hands the
+      # generated files back to the runner user so the later steps can read and
+      # commit them.
+      - name: Bundle im archlinux-Container bauen
+        run: |
+          docker run --rm \
+            -v "$PWD":/repo \
+            -v "$RUNNER_TEMP/iso":/iso:ro \
+            -w /repo \
+            -e GPU_TRIAGE_OWNER="$(id -u):$(id -g)" \
+            archlinux:latest \
+            bash offline/build_bundle.sh "/iso/$ISO_NAME"
+
+      - name: Artefakt pruefen
+        run: |
+          ZIP="gpu-triage-bundle-$ISO_DATE.zip"
+          cd offline/dist
+          sha256sum -c "$ZIP.sha256"
+          # Unpack the asset and verify the packages inside it: the part of
+          # "a bundle from the release behaves like a locally built one" that
+          # can be proven without booting a machine.
+          mkdir -p "$RUNNER_TEMP/unpacked"
+          python3 -m zipfile -e "$ZIP" "$RUNNER_TEMP/unpacked"
+          cd "$RUNNER_TEMP/unpacked"
+          sha256sum -c SHA256SUMS --quiet
+          grep -q "ARCHISO_DATE='$ISO_DATE'" manifest.env
+          echo "Verified $(wc -l < SHA256SUMS) packages against SHA256SUMS."
+          cat manifest.env
+
+      - name: Release anlegen
+        run: |
+          ZIP="offline/dist/gpu-triage-bundle-$ISO_DATE.zip"
+          . offline/manifest.env
+          NOTES="$RUNNER_TEMP/notes.md"
+          cat > "$NOTES" <<EOF
+          Offline-Bundle fuer **$ISO_NAME**.
+
+          | | |
+          | --- | --- |
+          | ISO | \`$ISO_NAME\` |
+          | ISO SHA256 | \`$ISO_SHA256\` |
+          | Erwarteter Kernel | \`$EXPECTED_KERNEL\` |
+          | Pakete im Bundle | $BUNDLE_PACKAGES |
+
+          Das Bundle enthaelt nur, was dieses ISO nicht schon mitbringt, und ist
+          deshalb **ausschliesslich** auf genau diesem ISO installierbar.
+          \`offline/release.json\` im Repository pinnt das Paar; \`tools/prepare-usb.ps1\`
+          liest es und laedt beide Teile selbst. Von Hand wird nichts hier
+          heruntergeladen.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
+            gh release edit "$TAG" --notes-file "$NOTES"
+          else
+            gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+              --title "Offline-Bundle $ISO_DATE" --notes-file "$NOTES"
+          fi
+
+      - name: release.json erzeugen
+        run: |
+          ZIP="gpu-triage-bundle-$ISO_DATE.zip"
+          {
+            echo "ISO_DATE=$ISO_DATE"
+            echo "ISO_NAME=$ISO_NAME"
+            echo "ISO_SHA256=$ISO_SHA256"
+            echo "ISO_SIZE=$(stat -Lc %s "$RUNNER_TEMP/iso/$ISO_NAME")"
+          } > "$RUNNER_TEMP/iso.env"
+          python3 offline/release_meta.py write \
+            --iso-meta "$RUNNER_TEMP/iso.env" \
+            --bundle "offline/dist/$ZIP" \
+            --bundle-url "${{ github.server_url }}/${{ github.repository }}/releases/download/$TAG/$ZIP"
+          python3 offline/release_meta.py check --bundle "offline/dist/$ZIP"
+          cat offline/release.json
+
+      # A PR rather than a push to the default branch: the ISO/bundle/kernel
+      # coupling is the one thing in this repository that must never change
+      # unnoticed.
+      - name: Pull Request fuer release.json
+        run: |
+          # --porcelain rather than 'git diff': on the very first run
+          # release.json is untracked, and git diff reports untracked files as
+          # unchanged — the release would be published without ever opening the
+          # pull request that pins it.
+          if [ -z "$(git status --porcelain -- offline/release.json)" ]; then
+            echo "release.json unchanged — no pull request needed."
+            exit 0
+          fi
+          BASE="${{ github.event.repository.default_branch }}"
+          BRANCH="bundle/$ISO_DATE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "$BRANCH"
+          git add offline/release.json
+          git commit -m "Offline-Bundle auf Arch-ISO $ISO_DATE heben
+
+          Erzeugt von .github/workflows/bundle.yml aus Release $TAG."
+          git push --force origin "$BRANCH"
+          if [ -z "$(gh pr list --head "$BRANCH" --base "$BASE" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base "$BASE" --head "$BRANCH" \
+              --title "Offline-Bundle auf Arch-ISO $ISO_DATE heben" \
+              --body "Automatisch erzeugt aus Release \`$TAG\`.
+
+          - ISO: \`$ISO_NAME\`
+          - Bundle: Release-Asset \`gpu-triage-bundle-$ISO_DATE.zip\`
+
+          Mit dem Merge dieses PRs zieht \`tools/prepare-usb.ps1\` das neue Paar."
+          else
+            echo "Pull request for $BRANCH already open — branch updated."
+          fi

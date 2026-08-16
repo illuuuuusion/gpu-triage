@@ -72,13 +72,23 @@ ISO und Bundle.
 
 ```json
 {
+  "schema": 1,
+  "generated": "2026-08-16T19:31:50Z",
   "iso_date": "2026.08.01",
   "iso_name": "archlinux-2026.08.01-x86_64.iso",
   "iso_sha256": "…",
-  "iso_urls": ["https://geo.mirror.pkgbuild.com/iso/2026.08.01/archlinux-2026.08.01-x86_64.iso"],
-  "expected_kernel": "6.16.1-arch1-1",
+  "iso_size": 1597014016,
+  "iso_urls": [
+    "https://geo.mirror.pkgbuild.com/iso/2026.08.01/archlinux-2026.08.01-x86_64.iso",
+    "https://archive.archlinux.org/iso/2026.08.01/archlinux-2026.08.01-x86_64.iso"
+  ],
+  "expected_kernel": "7.1.5-arch1-2",
+  "release_tag": "bundle-2026.08.01",
+  "bundle_name": "gpu-triage-bundle-2026.08.01.zip",
   "bundle_url": "https://github.com/<owner>/gpu-triage/releases/download/bundle-2026.08.01/gpu-triage-bundle-2026.08.01.zip",
-  "bundle_sha256": "…"
+  "bundle_sha256": "…",
+  "bundle_size": 389537369,
+  "bundle_packages": 25
 }
 ```
 
@@ -257,24 +267,68 @@ nicht durch eine Testdatei.
 
 ---
 
-## Phase 2 — Bundle in CI bauen und veröffentlichen
+## Phase 2 — Bundle in CI bauen und veröffentlichen ✅ umgesetzt
 
 **Warum:** Erst hiermit verschwindet die Linux-Anforderung auf dem Vorbereitungs-PC
 vollständig. Phase 1 macht es möglich, Phase 2 macht es nutzbar.
 
+> **Stand nach Umsetzung.** Neu sind [.github/workflows/bundle.yml](.github/workflows/bundle.yml)
+> und [offline/release_meta.py](offline/release_meta.py). Der Bau im Container ist
+> gegen das echte ISO `archlinux-2026.08.01` nachgestellt worden (176 → 25 Pakete,
+> 372 MB), ebenso jeder Shell-Schritt des Workflows.
+>
+> Zwei Abweichungen vom Planentwurf, beide unten erklärt:
+> 1. **Der Job läuft nicht *im* `archlinux`-Container**, sondern startet ihn (2.1).
+> 2. **`iso_urls` enthält zusätzlich `archive.archlinux.org`** — ohne diesen
+>    Eintrag verfällt eine `release.json` nach einem Monat (2.3).
+>
+> Zwei Fehler sind erst beim Nachstellen aufgefallen und behoben (2.5).
+
 ### 2.1 Workflow `.github/workflows/bundle.yml`
 
-- Trigger: `workflow_dispatch` + `schedule` (monatlich, kurz nach dem üblichen
-  Arch-ISO-Release am Monatsersten).
-- Läuft im Container `archlinux:latest` auf `ubuntu-latest`.
-- Schritte: ISO-Datum ermitteln → ISO laden → **offizielle `sha256sums.txt` prüfen**
-  → `build_bundle.sh` → ZIP → Release `bundle-<isodate>` anlegen → `release.json`
-  erzeugen und als Commit/PR ins Repo zurückschreiben.
+- Trigger: `workflow_dispatch` (mit `iso_version` und `force`) + `schedule`
+  (`0 6 2 * *`, also einen Tag nach dem üblichen Arch-ISO-Release).
+- Zwei Jobs: `resolve` bestimmt das ISO und prüft, ob es das Release schon gibt;
+  `build` läuft nur, wenn es etwas zu tun gibt. Ein Monatslauf ohne neues ISO
+  kostet damit Sekunden statt eines 1,6-GB-Downloads.
+
+**Korrektur gegenüber dem Planentwurf: der Job läuft nicht *im* Container.**
+`container: archlinux:latest` hätte auch `actions/checkout`, `git`, `gh` und
+`python3` in die Arch-Umgebung verlegt — dort fehlt jedes davon außer `python3`
+nicht standardmäßig, und `gh` gar nicht erst. Stattdessen läuft der Job auf
+`ubuntu-latest` und startet für genau einen Schritt
+
+```bash
+docker run --rm -v "$PWD":/repo -v "$RUNNER_TEMP/iso":/iso:ro -w /repo \
+  -e GPU_TRIAGE_OWNER="$(id -u):$(id -g)" archlinux:latest \
+  bash offline/build_bundle.sh "/iso/$ISO_NAME"
+```
+
+Das ist wörtlich das Kommando, das die README schon für den manuellen Weg nennt —
+CI und Handarbeit laufen nachweislich durch denselben Pfad. `GPU_TRIAGE_OWNER`
+gibt die im Container als root erzeugten Dateien an den Runner-Benutzer zurück,
+sonst könnte der Commit-Schritt sie nicht anfassen.
+
+Schrittfolge: ISO auflösen → Release-Gate → ISO laden und prüfen → Container-Bau
+→ Artefakt prüfen → Release `bundle-<isodate>` → `release.json` → PR.
 
 ### 2.2 ISO-Datum bestimmen
 
-`https://archlinux.org/releng/releases/json/` liefert die Release-Liste inkl.
-Datum und SHA256. Kein Scraping, kein Raten des Dateinamens.
+`offline/release_meta.py iso [version|latest]` liest
+`https://archlinux.org/releng/releases/json/`. Kein Scraping, kein Raten des
+Dateinamens.
+
+**Die `sha256sums.txt`-Prüfung sitzt eine Stufe früher als geplant.** Der Entwurf
+wollte den Download dagegen prüfen; das allein bliebe aber eine Selbstbestätigung,
+wenn Hash und Datei aus derselben Quelle stammen. Umgesetzt ist deshalb: Die
+Release-Liste (eine Django-View) und die neben dem ISO liegende
+`sha256sums.txt` (mit den Images erzeugt) müssen sich über denselben Hash **einig
+sein** — sonst bricht der Lauf ab, bevor ein Byte geladen wird. Erst der so
+bestätigte Wert prüft dann den Download. Zwei unabhängige Quellen statt einer.
+
+`release_meta.py` benutzt ausschließlich die Standardbibliothek: das Skript läuft
+auf dem Runner, nicht im Arch-Container, also ist `python3` sicher vorhanden und
+`jq` als Abhängigkeit nicht nötig.
 
 ### 2.3 `release.json` als einzige Kopplung
 
@@ -282,15 +336,79 @@ Erzeugt von CI, im Repo eingecheckt, gelesen von `prepare-usb.ps1`. Wer bewusst
 bei einem älteren ISO bleiben will, checkt schlicht den passenden Commit aus —
 die Kopplung ISO↔Bundle↔Kernel ist damit versioniert statt mündlich.
 
-### 2.4 Akzeptanzkriterien Phase 2
+Das Schema steht in Abschnitt 3. Drei Felder mehr als im Entwurf, jedes mit
+einem Abnehmer:
 
-- Manuell ausgelöster Workflow erzeugt Release + Assets + `release.json`-PR.
-- `bundle_sha256` aus `release.json` stimmt mit dem Asset überein.
-- Ein aus dem Release gezogenes Bundle bootstrappt in der VM genauso wie ein lokal gebautes.
+- **`iso_size` / `bundle_size`** — Phase 3.1 Schritt 2 will den Platz prüfen
+  *„vor dem ersten Byte Download"*. Ohne die Größen im `release.json` ginge das nicht.
+- **`bundle_packages`** — erlaubt dem Doctor-Modus (3.2) die Aussage „14 von 25
+  Paketen auf dem Stick" statt bloß „irgendwas fehlt".
+- **`schema`** — damit ein künftiges `prepare-usb.ps1` ein zu neues `release.json`
+  benennen kann, statt an einem fehlenden Feld zu scheitern.
 
-**Aufwand:** ~0,5 Tag. Risiko niedrig.
-**Offene Frage:** Asset-Größe. GitHub erlaubt 2 GB pro Datei — nach Phase 1.3
-unkritisch, **ohne** Phase 1.3 grenzwertig. Deshalb ist 1.3 keine Kür.
+**`iso_urls` führt zusätzlich `archive.archlinux.org`.** Der Entwurf listete nur
+einen Mirror. Mirrors halten aber nur das *aktuelle* ISO vor: Sobald der nächste
+Monatsrelease erscheint, ist die URL im eingecheckten `release.json` tot — und
+genau dann, einen Monat später, wird die Datei benutzt. Das Archiv hält jedes ISO
+dauerhaft. Der Mirror steht deshalb vorn (schnell), das Archiv dahinter
+(haltbar), und `release_meta.py check` verweigert ein `release.json` ohne diese
+Rückfallebene.
+
+`release_meta.py` hat drei Unterkommandos, alle auch von Hand benutzbar:
+`iso` (Metadaten auflösen), `write` (`release.json` schreiben) und `check`
+(bestehendes `release.json` validieren, auf Wunsch gegen die Bundle-Datei).
+`write` bricht ab, wenn `manifest.env` ein anderes `ARCHISO_DATE` trägt als die
+ISO-Metadaten — ein `release.json`, das ein nicht zusammengehöriges Paar
+beschreibt, kann so gar nicht erst entstehen.
+
+### 2.4 Was beim Nachstellen aufgefallen ist
+
+Beide Fehler wären erst im Betrieb sichtbar geworden, keiner davon laut:
+
+1. **Der PR wäre beim allerersten Lauf ausgeblieben.** Die Abbruchbedingung war
+   `git diff --quiet -- offline/release.json`. `git diff` meldet für eine
+   *unversionierte* Datei keine Änderung — beim ersten Lauf existiert
+   `release.json` aber noch gar nicht im Repo. Das Release wäre veröffentlicht
+   worden, der PR, der es pinnt, nicht. Ersetzt durch `git status --porcelain`.
+2. **`pipefail` fehlte.** GitHubs Standard-Shell ist `bash -e` *ohne* `pipefail`.
+   In `release_meta.py iso … | tee -a "$GITHUB_OUTPUT"` hätte ein Fehlschlag des
+   Skripts vom erfolgreichen `tee` verdeckt werden können — der Build-Job wäre
+   mit leeren ISO-Variablen weitergelaufen. Ein `defaults: run: shell: bash`
+   erzwingt `-eo pipefail` für jeden Schritt.
+
+### 2.5 Akzeptanzkriterien Phase 2 — Ergebnis
+
+| Kriterium | Ergebnis |
+| --- | --- |
+| Workflow ist syntaktisch gültig | ✅ YAML geparst, alle 8 `run`-Blöcke gegen `bash -n` |
+| ISO-Auflösung gegen die echte Release-Liste | ✅ `latest` und gepinnt (`2026.08.01`); unbekannte Version bricht mit Exit 2 ab |
+| Hash aus zwei unabhängigen Quellen | ✅ releng-JSON == `sha256sums.txt` |
+| ISO-Download: Mirror-Ausfall und Hash-Fehler | ✅ Fallback aufs Archiv greift; falscher Hash beendet den Schritt mit Exit 1 |
+| Container-Bau wie im Workflow aufgerufen | ✅ gegen das echte ISO: 176 → 25 Pakete, 372 MB, Kernel `7.1.5-arch1-2` |
+| Dateien gehören danach dem Runner-Benutzer | ✅ via `GPU_TRIAGE_OWNER` |
+| Artefaktprüfung (Entpacken + `SHA256SUMS`) | ✅ 25/25, `ARCHISO_DATE` im Manifest passt |
+| `bundle_sha256` aus `release.json` == Asset | ✅ gegen `sha256sum` und gegen die `.sha256` des Bau-Skripts |
+| `release.json` wird bei Nichtübereinstimmung verweigert | ✅ 4 Schreib- und 8 Prüf-Fehlerfälle je Exit 2 |
+| PR-Schritt: Erstlauf, Zweitlauf, offener PR | ✅ Branch angelegt / force-aktualisiert / kein Duplikat |
+| Release-Gate (`force`, Release existiert) | ✅ alle drei Kombinationen |
+| Commit enthält nur `release.json` | ✅ Pakete, `dist/`, Cache bleiben durch `.gitignore` draußen |
+| Bestehende Regressionstests unverändert grün | ✅ 39 unittests + Stamp-Tests |
+
+Zwei Kriterien lassen sich **nur auf GitHub** abschließen und stehen noch aus:
+der tatsächlich ausgelöste Lauf (Release, Assets, PR gegen die echte API) und
+der Nachweis, dass ein *aus dem Release gezogenes* Bundle in der VM bootstrappt
+wie ein lokal gebautes. Nachgestellt ist davon alles, was ohne GitHub-Token und
+ohne Testhardware nachstellbar ist; die API-Aufrufe liefen gegen ein `gh`-Stub.
+
+`offline/release.json` liegt bewusst **noch nicht** im Repository: Die Datei
+entsteht im ersten CI-Lauf. Ein von Hand eingecheckter Inhalt würde auf ein
+Release-Asset zeigen, das es nicht gibt — genau die mündliche Kopplung, die
+diese Phase abschafft. Phase 3 setzt darauf auf und braucht deshalb einen
+gelaufenen Workflow.
+
+**Aufwand tatsächlich:** ~0,5 Tag. Risiko wie erwartet niedrig.
+**Zur offenen Frage Asset-Größe:** 372 MB gegen GitHubs 2-GB-Grenze — erledigt.
+Ohne Phase 1.3 wären es 659 MB gewesen, also noch im Rahmen, aber ohne Reserve.
 
 ---
 
@@ -411,8 +529,8 @@ App-Logik testen wollen, entfällt WSL2 damit ganz.
 | Phase | Ergebnis | Abhängig von | Aufwand | Risiko |
 | --- | --- | --- | --- | --- |
 | ~~1~~ | ✅ Bundle-Bau klein und containerfähig | — | 0,5 d (erledigt) | — |
-| 2 | Bundle als Release-Artefakt + `release.json` | 1 | 0,5 d | niedrig |
-| 3.1/3.2 | `prepare-usb.ps1` + `-Check` | 2 | 1 d | niedrig |
+| ~~2~~ | ✅ Bundle als Release-Artefakt + `release.json` | 1 | 0,5 d (erledigt) | — |
+| 3.1/3.2 | `prepare-usb.ps1` + `-Check` | 2 (erster CI-Lauf) | 1 d | niedrig |
 | 4 (1+2) | ein Kommando beim Booten | — | 2 h | niedrig |
 | 5 | Doku + Tests | 1–4 | 0,5 d | niedrig |
 | 3.3 | `-InstallVentoy` | 3.1 | 0,5 d | **hoch** |
