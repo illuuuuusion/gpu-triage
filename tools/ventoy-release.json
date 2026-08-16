@@ -1,0 +1,10 @@
+{
+  "note": "Pinned Ventoy release for tools/prepare-usb.ps1 -InstallVentoy. The hash was taken from the official sha256.txt of the same release and re-checked against the downloaded file. To raise the version, replace all four values and verify the new hash the same way.",
+  "version": "1.1.17",
+  "asset": "ventoy-1.1.17-windows.zip",
+  "url": "https://github.com/ventoy/Ventoy/releases/download/v1.1.17/ventoy-1.1.17-windows.zip",
+  "sha256": "d250e97a7595fdac4f97debc630d7a8da942319274a76cb32384596b659dbaeb",
+  "size": 16650853,
+  "sha256_source": "https://github.com/ventoy/Ventoy/releases/download/v1.1.17/sha256.txt",
+  "verified": "2026-08-16"
+}

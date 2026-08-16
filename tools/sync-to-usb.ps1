@@ -36,7 +36,9 @@ if ($IsoPath) {
 }
 
 Write-Host ''
-Write-Host 'USB ready.'
-Write-Host "Boot the Arch ISO through Ventoy, then run:"
-Write-Host '  mkdir -p /mnt/ventoy && mount /dev/disk/by-label/Ventoy /mnt/ventoy'
-Write-Host '  bash /mnt/ventoy/gpu-triage/start.sh'
+Write-Host 'Repository synced.'
+Write-Host 'Boot the Arch ISO through Ventoy, then type this one line:'
+Write-Host '  m=/mnt/v; mkdir -p $m; mount /dev/disk/by-label/Ventoy $m; bash $m/gpu-triage/go.sh list'
+Write-Host ''
+Write-Host 'go.sh mounts and remounts as needed and then hands over to start.sh.'
+Write-Host 'prepare-usb.ps1 writes the same line into BOOT.txt on the stick root.'

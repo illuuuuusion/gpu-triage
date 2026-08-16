@@ -52,13 +52,52 @@ v0.1 erhebt pro Zielkarte:
 **Vorbereitungs-PC**
 
 - Windows mit Git und PowerShell zum Synchronisieren des Sticks
-- ein internetfähiges Arch-System (VM oder WSL) zum Bauen des Offline-Bundles
 - USB-Stick mit [Ventoy](https://www.ventoy.net/) und ausreichend Platz für ISO, Repo und Pakete
+- ein internetfähiges Arch-System (VM, WSL oder Container) — **nur** für den
+  manuellen Weg, also wenn das Offline-Bundle selbst gebaut werden soll
 
 ## Einrichtung
 
 Die Einrichtung erfolgt einmalig auf dem Vorbereitungs-PC. Es wird **kein eigenes
 ArchISO gebaut**; das Repository bleibt vom Live-System getrennt.
+
+### Der kurze Weg: ein Kommando
+
+```powershell
+.\tools\prepare-usb.ps1
+```
+
+Das Skript liest [offline/release.json](offline/release.json) — die eine Datei,
+die ISO, Kernel und Offline-Bundle aneinander bindet — und erledigt den Rest:
+Ventoy-Stick finden, Platz prüfen, ISO und Bundle hash-verifiziert laden,
+Repository spiegeln, Ergebnis prüfen, `BOOT.txt` schreiben. Kein Linux nötig.
+
+| Schalter | Wirkung |
+| --- | --- |
+| `-Check` | Doctor-Modus: prüft den Stick, schreibt nichts, Exit 0/1 |
+| `-Drive E:` | Laufwerk vorgeben statt über das Label `Ventoy` zu suchen |
+| `-Force` | alles erneut laden und prüfen, auch wenn es passend erscheint |
+| `-InstallVentoy` | Ventoy vorher installieren — **löscht das Ziellaufwerk** |
+| `-CacheDir` | Download-Cache (Standard: `%LOCALAPPDATA%\gpu-triage\cache`) |
+
+Jeder Download wird gegen den Hash aus `release.json` geprüft und
+zwischengespeichert; ein zweiter Lauf lädt nichts erneut und ist damit auch der
+schnelle Weg, nur eine Code-Änderung auf den Stick zu bringen.
+
+`-InstallVentoy` ist bewusst nicht Teil des Standardlaufs: Es akzeptiert nur
+USB-Laufwerke unterhalb einer Größenschwelle (`-MaxDiskSizeGB`, Standard 256),
+zeigt Modell, Seriennummer und Größe an und verlangt die getippte Bestätigung
+`ERASE DISK <n>` — kein `[J/N]`. Die Ventoy-Version und ihr SHA256 sind in
+[tools/ventoy-release.json](tools/ventoy-release.json) gepinnt.
+
+> `release.json` entsteht im CI-Lauf von
+> [.github/workflows/bundle.yml](.github/workflows/bundle.yml). Solange die
+> Datei nicht im Repository liegt, bleibt nur der manuelle Weg unten —
+> `prepare-usb.ps1` sagt das beim Start.
+
+### Der manuelle Weg
+
+Die folgenden Schritte bauen das Bundle selbst und kommen ohne GitHub aus.
 
 ### 1. Ventoy installieren
 
@@ -146,7 +185,9 @@ nur `offline/packages/`. Ergebnis:
 ```text
 VENTOY_USB/
 ├── archlinux-YYYY.MM.DD-x86_64.iso
+├── BOOT.txt                     # nur von prepare-usb.ps1: das Boot-Kommando
 └── gpu-triage/
+    ├── go.sh
     ├── start.sh
     ├── app/
     ├── scripts/
@@ -162,16 +203,37 @@ VENTOY_USB/
 
 ## Verwendung
 
-Vom Ventoy-Stick booten, das offizielle Arch-ISO wählen und in der Root-Shell die
-Datenpartition mounten:
+Vom Ventoy-Stick booten, das offizielle Arch-ISO wählen und in der Root-Shell
+diese **eine Zeile** tippen — sie steht wortgleich in `BOOT.txt` im Stick-Root:
+
+```bash
+m=/mnt/v; mkdir -p $m; mount /dev/disk/by-label/Ventoy $m; bash $m/gpu-triage/go.sh list
+```
+
+Danach genügt für jeden weiteren Aufruf:
+
+```bash
+bash $m/gpu-triage/go.sh quick --gpu 0000:03:00.0
+```
+
+`go.sh` ist ein Wrapper vor `start.sh`, kein zweiter Pfad: Er sucht die
+Ventoy-Datenpartition selbst, mountet sie read-write nach, falls das
+Live-System sie schreibgeschützt eingehängt hat, und übergibt dann an
+`start.sh`. Das ist nötig, weil Reports auf den Stick zurückgeschrieben werden.
+
+`start.sh` bleibt der einzige Einstiegspunkt und ruft bei Bedarf den Bootstrap
+auf; direkt aufrufen lässt es sich weiterhin:
 
 ```bash
 mkdir -p /mnt/ventoy
 mount /dev/disk/by-label/Ventoy /mnt/ventoy
-bash /mnt/ventoy/gpu-triage/start.sh
+bash /mnt/ventoy/gpu-triage/start.sh list
 ```
 
-`start.sh` ist der einzige Einstiegspunkt und ruft bei Bedarf den Bootstrap auf.
+> **Wenn das Mounten fehlschlägt.** Ventoy blendet die Partition aus, auf der
+> das gebootete ISO liegt; sie ist dann nur über den Device-Mapper-Knoten
+> (`/dev/mapper/sdX1` statt `/dev/sdX1`) erreichbar. `go.sh` probiert beide
+> Varianten selbst durch — genau dafür gibt es ihn.
 
 ### Befehle
 
@@ -250,6 +312,7 @@ Skripte ist das der wichtige Unterschied.
 
 ```text
 gpu-triage/
+├── go.sh                       # Wrapper: Stick finden/mounten, dann start.sh
 ├── start.sh                    # Einstiegspunkt: Routing, Rechte, Bootstrap-Aufruf
 ├── app/
 │   └── gpu_diag.py             # Diagnose-Orchestrator
@@ -257,6 +320,8 @@ gpu-triage/
 │   └── bootstrap.sh            # Offline-Runtime installieren, Treiber laden
 ├── offline/
 │   ├── build_bundle.sh         # baut das Offline-Paketbundle (Internet-PC)
+│   ├── release_meta.py         # löst ISO-Release auf, schreibt/prüft release.json
+│   ├── release.json            # von CI erzeugt: pinnt ISO + Kernel + Bundle
 │   ├── package-list.txt        # bewusst kleine Runtime-Paketliste
 │   ├── packages/               # generiert, nicht in Git
 │   ├── manifest.env            # generiert, bindet Bundle an ISO-Kernel
@@ -265,7 +330,11 @@ gpu-triage/
 │   ├── dist/                   # generiert, Bundle als ZIP-Artefakt
 │   └── .dlcache/               # generiert, Download-Cache (nicht auf den Stick)
 ├── tools/
+│   ├── prepare-usb.ps1         # Windows: der eine Vorbereitungsbefehl
+│   ├── ventoy-release.json     # gepinnte Ventoy-Version samt SHA256
 │   └── sync-to-usb.ps1         # Windows: Repo und ISO auf den Ventoy-Stick
+├── .github/workflows/
+│   └── bundle.yml              # baut das Bundle, veröffentlicht es, pinnt es
 ├── tests/                      # Regressionstests, keine GPU erforderlich
 ├── reports/                    # Reportausgabe auf demselben USB-Stick
 ├── README.md
