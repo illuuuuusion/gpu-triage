@@ -262,9 +262,17 @@ def aer_snapshot(bdf: str) -> dict[str, Any]:
 
 
 def numeric_delta(before: Any, after: Any) -> Any:
-    if isinstance(before, dict) and isinstance(after, dict):
-        keys = set(before) | set(after)
-        return {k: numeric_delta(before.get(k, 0), after.get(k, 0)) for k in sorted(keys)}
+    """Recursive delta over nested counter dicts.
+
+    A branch present on only one side is treated as all-zero on the other side,
+    not as unknown. An AER counter file that first appears during the run — a
+    device that re-enumerated after a link event — would otherwise be dropped
+    silently, which is exactly the evidence this tool exists to catch.
+    """
+    if isinstance(before, dict) or isinstance(after, dict):
+        b = before if isinstance(before, dict) else {}
+        a = after if isinstance(after, dict) else {}
+        return {k: numeric_delta(b.get(k, 0), a.get(k, 0)) for k in sorted(set(b) | set(a))}
     if isinstance(before, int) and isinstance(after, int):
         return after - before
     return None
@@ -421,14 +429,25 @@ def memtest_missing_reason() -> str:
     return "memtest_vulkan not found on PATH; install the offline package bundle"
 
 
+def bdf_bus_device(bdf: str) -> str:
+    """'0000:03:00.0' -> '03:00', the addressing granularity memtest_vulkan prints."""
+    parts = bdf.lower().split(":")
+    if len(parts) < 2:
+        return bdf.lower()
+    return f"{parts[-2]}:{parts[-1].split('.')[0]}"
+
+
 def parse_memtest_device(line: str) -> tuple[int, str] | None:
-    # Example: 1: Bus=0x01:00 DevId=0x2204   24GB NVIDIA ...
+    """Parse one device line: '1: Bus=0x01:00 DevId=0x2204   24GB NVIDIA ...'.
+
+    memtest_vulkan prints neither the PCI domain nor the function, so the
+    bus:device pair is returned exactly as reported. Fabricating a '0000:'
+    domain here would permanently hide GPUs on a non-zero domain.
+    """
     m = re.search(r"^\s*(\d+):\s+Bus=0x([0-9A-Fa-f]{2}):([0-9A-Fa-f]{2})\b", line)
     if not m:
         return None
-    idx = int(m.group(1))
-    bdf = f"0000:{m.group(2).lower()}:{m.group(3).lower()}.0"
-    return idx, bdf
+    return int(m.group(1)), f"{m.group(2).lower()}:{m.group(3).lower()}"
 
 
 def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[str, Any]:
@@ -455,6 +474,9 @@ def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[st
     selected = False
     selection_sent = False
     selected_index: int | None = None
+    target_matches: list[int] = []
+    target_key = bdf_bus_device(target_bdf)
+    target_unreachable = False
     devices_seen: dict[int, str] = {}
 
     with log_path.open("w", encoding="utf-8", errors="replace") as log:
@@ -480,7 +502,8 @@ def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[st
         interrupted = False
 
         def consume_text(text: str) -> None:
-            nonlocal parse_buffer, selected_index, selected, selection_sent, test_deadline
+            nonlocal parse_buffer, selected_index, selected, selection_sent
+            nonlocal test_deadline, target_unreachable
             if not text:
                 return
             chunks.append(text)
@@ -493,9 +516,10 @@ def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[st
             for clean in lines:
                 parsed = parse_memtest_device(clean)
                 if parsed:
-                    devices_seen[parsed[0]] = parsed[1]
-                    if parsed[1].lower() == target_bdf.lower():
-                        selected_index = parsed[0]
+                    index, seen = parsed
+                    devices_seen[index] = seen
+                    if seen == target_key and index not in target_matches:
+                        target_matches.append(index)
                 if clean.startswith("Testing ") or "Standard 5-minute test of" in clean:
                     selected = True
                     if test_deadline is None:
@@ -503,18 +527,34 @@ def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[st
 
             # The selection prompt may not end in a newline, so inspect the partial buffer too.
             if ("Override index to test:" in parse_buffer or "Override index to test:" in text) and not selection_sent:
-                if selected_index is not None and p.stdin:
+                # Either the target is addressed unambiguously now, or the run is
+                # over. Letting the prompt time out hands the test to whatever
+                # device memtest_vulkan autoselects, and a verdict for a GPU that
+                # was never touched is worse than no verdict at all.
+                if len(target_matches) == 1 and p.stdin:
                     try:
-                        p.stdin.write(f"{selected_index}\n".encode())
+                        p.stdin.write(f"{target_matches[0]}\n".encode())
                         p.stdin.flush()
+                        selected_index = target_matches[0]
                         selection_sent = True
                     except (BrokenPipeError, OSError):
-                        pass
+                        target_unreachable = True
+                else:
+                    target_unreachable = True
 
         while True:
             if p.poll() is not None:
                 break
             now = time.monotonic()
+            # Stop before the autoselect timer expires and starts loading a
+            # foreign device instead of the target.
+            if target_unreachable:
+                try:
+                    os.killpg(p.pid, signal.SIGINT)
+                    interrupted = True
+                except ProcessLookupError:
+                    pass
+                break
             # Once the target test has actually started, count the requested duration from that moment.
             if test_deadline is not None and now >= test_deadline:
                 try:
@@ -559,22 +599,36 @@ def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[st
                 tail, _ = p.communicate()
         if tail:
             consume_text(tail.decode(errors="replace") if isinstance(tail, bytes) else tail)
-        if parse_buffer:
-            chunks.append(parse_buffer)
-            log.write(parse_buffer)
+        # No flush of parse_buffer here: consume_text already logged and collected
+        # every chunk in full, so appending the trailing partial line again would
+        # duplicate it in both the log and the analysed text.
 
     text = "".join(chunks)
     low = text.lower()
-    if "error found" in low:
+    reason: str | None = None
+    seen_list = ", ".join(sorted(set(devices_seen.values()))) or "none"
+
+    # Attribution before interpretation. A PASS or FAIL may only be reported once
+    # it is established that memtest_vulkan tested the requested GPU; reading the
+    # output text first would attribute a foreign device's result to the target.
+    if len(target_matches) > 1:
+        status = "ERROR"
+        reason = (f"memtest_vulkan listed {len(target_matches)} devices at bus:device {target_key}; "
+                  f"the target could not be identified unambiguously")
+    elif selected_index is None:
+        status = "ERROR"
+        reason = (f"memtest_vulkan did not offer {target_bdf} (bus:device {target_key}); "
+                  f"devices listed: {seen_list}")
+    elif any(x in low for x in ("early exit", "runtime error", "initialization_failed", "incompatible_driver")):
+        status = "ERROR"
+        reason = "memtest_vulkan reported an initialization or runtime failure"
+    elif not selected:
+        status = "ERROR"
+        reason = "memtest_vulkan never started a test run on the selected device"
+    elif "error found" in low:
         status = "FAIL"
     elif "no any errors" in low and "passed" in low:
         status = "PASS"
-    elif any(x in low for x in ("early exit", "runtime error", "initialization_failed", "incompatible_driver")):
-        status = "ERROR"
-    elif selected_index is None:
-        status = "ERROR"
-    elif not selected:
-        status = "ERROR"
     else:
         status = "INCONCLUSIVE"
 
@@ -582,8 +636,10 @@ def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[st
     error_summaries = [line for line in all_lines if "Error found" in line or "Errors address range" in line]
     return {
         "status": status,
+        "reason": reason,
         "seconds": round(time.monotonic() - started, 2),
         "target_bdf": target_bdf,
+        "target_bus_device": target_key,
         "selected_index": selected_index,
         "devices_seen": devices_seen,
         "error_summaries": error_summaries[:50],
@@ -598,7 +654,12 @@ def choose_report_dir(explicit: str | None) -> Path:
     # partition; --gpu-less direct invocations fall back to the working directory.
     target = explicit or os.environ.get("GPU_TRIAGE_REPORT_DIR")
     p = Path(target).expanduser().resolve() if target else Path.cwd() / "gpu-triage-reports"
-    p.mkdir(parents=True, exist_ok=True)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        # A read-only remounted USB stick is the expected failure here and
+        # deserves an instruction, not a traceback.
+        raise DiagError(f"Report directory {p} cannot be created: {e}. Use --report-dir.") from e
     return p
 
 
@@ -661,9 +722,14 @@ def classify(report: dict[str, Any]) -> dict[str, Any]:
                 severity = "WARN"
 
     aer_pos = positive_numbers(report.get("aer_delta", {}))
-    # TOTAL counters duplicate component counters. Show them, but classify any positive change as suspicious.
+    # Root-port TOTAL counters overlap the per-component ones, so a bare count of
+    # affected counters overstates the number of events. Name them instead and let
+    # the reader see the overlap; any positive change stays a FAIL.
     if aer_pos:
-        findings.append({"severity": "FAIL", "area": "PCIE", "message": f"PCIe AER counters increased during test ({len(aer_pos)} counter(s))."})
+        detail = "; ".join(f"{path.lstrip('/')} +{value}" for path, value in aer_pos[:5])
+        if len(aer_pos) > 5:
+            detail += f"; and {len(aer_pos) - 5} more"
+        findings.append({"severity": "FAIL", "area": "PCIE", "message": f"PCIe AER counters increased during test: {detail}"})
         severity = "FAIL"
 
     ksig = report.get("kernel_failure_signals", [])
@@ -798,9 +864,12 @@ def list_gpus() -> int:
     if not gpus:
         print("No display-class PCI GPUs found.")
         return 2
-    for i, g in enumerate(gpus, 1):
+    # Deliberately unnumbered: --gpu takes a PCI address, never a list position,
+    # and an ordinal here invites '--gpu 1'. The interactive prompt in
+    # select_gpu() stays the only numbered list.
+    for g in gpus:
         role = "boot/display" if g.boot_vga else "test candidate"
-        print(f"{i}) {g.bdf} {g.vendor:<6} device=0x{g.device_id:04x} driver={g.driver or '-':<12} [{role}]")
+        print(f"{g.bdf}  {g.vendor:<6} device=0x{g.device_id:04x} driver={g.driver or '-':<12} [{role}]")
     return 0
 
 
@@ -824,6 +893,7 @@ def run_quick(args: argparse.Namespace, interactive: bool = False) -> int:
     telemetry_before = collect_telemetry(gpu)
 
     if args.no_vram:
+        print("4/5 VRAM test skipped (--no-vram); this run cannot result in PASS.")
         vram = {"status": "SKIPPED"}
     else:
         print(f"4/5 VRAM test for ~{args.vram_seconds}s (driver-managed Vulkan, no /dev/mem)...")
@@ -858,13 +928,19 @@ def run_quick(args: argparse.Namespace, interactive: bool = False) -> int:
     }
     report["classification"] = classify(report)
 
-    json_path = report_dir / (stem + ".json")
-    txt_path = report_dir / (stem + ".txt")
-    json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
-    txt_path.write_text(text_report(report), encoding="utf-8")
-
+    # Print before persisting: if the stick went read-only during the run, the
+    # evidence is at least on screen instead of lost behind a write error.
     print()
     print(text_report(report))
+
+    json_path = report_dir / (stem + ".json")
+    txt_path = report_dir / (stem + ".txt")
+    try:
+        json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        txt_path.write_text(text_report(report), encoding="utf-8")
+    except OSError as e:
+        raise DiagError(f"Could not write report to {report_dir}: {e}. Use --report-dir.") from e
+
     print(f"JSON: {json_path}")
     print(f"TEXT: {txt_path}")
     if sidecar.exists():
@@ -915,6 +991,10 @@ def main() -> int:
         print("\nCancelled.", file=sys.stderr)
         return 130
     except DiagError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        # Removable media can disappear mid-run. Report it, do not traceback.
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 

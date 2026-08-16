@@ -15,7 +15,6 @@ und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 ## Inhalt
 
 - [Funktionsumfang](#funktionsumfang)
-- [Nicht enthalten](#nicht-enthalten)
 - [Voraussetzungen](#voraussetzungen)
 - [Einrichtung](#einrichtung)
 - [Verwendung](#verwendung)
@@ -191,6 +190,23 @@ PCI sichtbar? → Treiber gebunden? → Vulkan verfügbar? → VRAM-Test ausfüh
              → AER / Kernel / Datenfehler unter Last?
 ```
 
+Ein Ergebnis wird immer nur der tatsächlich getesteten Karte zugeschrieben. Listet
+`memtest_vulkan` die Zieladresse nicht auf, bricht der VRAM-Test ab, statt die
+automatisch vorausgewählte Nachbarkarte zu belasten und deren Ergebnis zu melden.
+
+### Exit-Codes
+
+| Code | Bedeutung |
+| --- | --- |
+| `0` | Diagnose gelaufen, Gesamtergebnis `PASS` |
+| `1` | Diagnose gelaufen, Gesamtergebnis `WARN` oder `FAIL` — der Report zählt die Befunde auf |
+| `2` | Lauf nicht möglich: keine GPU gefunden, ungültige Adresse, Reportverzeichnis nicht beschreibbar |
+| `3` | Bootstrap abgebrochen: Offline-Bundle passt nicht zum laufenden Kernel |
+| `130` | Abbruch durch Strg+C |
+
+`1` heißt „gemessen und etwas gefunden", `2` heißt „gar nicht erst gemessen" — für
+Skripte ist das der wichtige Unterschied.
+
 ## Konfiguration
 
 | Variable | Wirkung |
@@ -219,6 +235,7 @@ gpu-triage/
 ├── tests/                      # Regressionstests, keine GPU erforderlich
 ├── reports/                    # Reportausgabe auf demselben USB-Stick
 ├── README.md
+├── TESTING-WINDOWS-VM.md       # Testablauf in einer VM unter Windows
 └── ROADMAP.md
 ```
 
@@ -249,6 +266,10 @@ temporären Verzeichnissen und nutzen ausschließlich die Standardbibliothek:
 python3 -m unittest discover -s tests -v
 bash tests/test_bootstrap_stamp.sh
 ```
+
+Boot, Bootstrap, Paketverifikation und Reportausgabe lassen sich ohne Diagnose-PC
+in einer VM prüfen — siehe [TESTING-WINDOWS-VM.md](TESTING-WINDOWS-VM.md). Die
+Hardware-Messpfade bleiben echtem Blech vorbehalten.
 
 ## Designentscheidungen
 

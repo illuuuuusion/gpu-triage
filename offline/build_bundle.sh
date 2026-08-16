@@ -41,7 +41,11 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
 fi
 
 command -v pacman >/dev/null 2>&1 || die "Run this on Arch Linux."
-pacman -Syu --needed --noconfirm arch-install-scripts archlinux-keyring
+# Sync only, never -u: this only needs two specific packages current, not a
+# full upgrade of the host. A -Syu here previously turned an unrelated,
+# already-installed package's signature hiccup into a hard blocker for the
+# unrelated task of building the bundle.
+pacman -Sy --needed --noconfirm arch-install-scripts archlinux-keyring
 command -v pacstrap >/dev/null 2>&1 || die "pacstrap not available"
 
 mapfile -t TARGETS < <(grep -Ev '^\s*(#|$)' "$LIST_FILE")

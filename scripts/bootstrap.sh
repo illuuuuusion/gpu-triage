@@ -68,6 +68,19 @@ fi
 if [[ -f "$SUMS" ]]; then
   log "Verifying offline bundle hashes..."
   (cd "$REPO_ROOT/offline" && sha256sum -c SHA256SUMS --quiet) || die "Offline package checksum verification failed."
+
+  # Install exactly what was hashed. A package file sitting in the directory but
+  # absent from SHA256SUMS was never verified and must not enter the transaction.
+  DISCOVERED=${#PACKAGE_FILES[@]}
+  mapfile -t PACKAGE_FILES < <(
+    awk -v dir="$REPO_ROOT/offline" 'NF >= 2 { sub(/^\*/, "", $2); print dir "/" $2 }' "$SUMS" | sort
+  )
+  [[ ${#PACKAGE_FILES[@]} -gt 0 ]] || die "SHA256SUMS lists no packages."
+  if [[ ${#PACKAGE_FILES[@]} -lt $DISCOVERED ]]; then
+    log "Ignoring $((DISCOVERED - ${#PACKAGE_FILES[@]})) package file(s) not covered by SHA256SUMS."
+  fi
+else
+  log "No SHA256SUMS present; installing unverified package files from $PKG_DIR."
 fi
 
 log "Installing required runtime packages from USB only..."

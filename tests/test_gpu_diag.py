@@ -275,5 +275,124 @@ class TestFindMemtest(unittest.TestCase):
         self.assertEqual(gpu_diag.classify(base_report("UNAVAILABLE"))["overall"], "WARN")
 
 
+class TestMemtestAttribution(unittest.TestCase):
+    """A verdict may only be reported for the GPU that was actually tested.
+
+    memtest_vulkan autoselects the first device when the selection prompt times
+    out, so a target it never listed would otherwise get another card's result.
+    """
+
+    PASS_TAIL = "memtest_vulkan: no any errors, testing PASSed."
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._path = os.environ.get("PATH", "")
+        self._override = os.environ.pop(gpu_diag.MEMTEST_ENV, None)
+
+    def tearDown(self):
+        os.environ["PATH"] = self._path
+        os.environ.pop(gpu_diag.MEMTEST_ENV, None)
+        if self._override is not None:
+            os.environ[gpu_diag.MEMTEST_ENV] = self._override
+
+    def _fake_memtest(self, devices: list[str], *, tail: str, newline: bool = False) -> None:
+        """Install a stub that mimics the real device list, prompt and summary."""
+        listing = "".join(
+            f"{i}: Bus=0x{bus}   8GB Fake GPU\\n" for i, bus in enumerate(devices, 1)
+        )
+        script = (
+            f"#!{sys.executable}\n"
+            "import sys, time\n"
+            f'sys.stdout.write("{listing}")\n'
+            'sys.stdout.write("(first device will be autoselected in 8 seconds)'
+            '   Override index to test:")\n'
+            "sys.stdout.flush()\n"
+            "time.sleep(0.6)\n"
+            'sys.stdout.write("\\n    Standard 5-minute test of 1: Bus=0x00:00\\n")\n'
+            "sys.stdout.flush()\n"
+            "time.sleep(0.4)\n"
+            f'sys.stdout.write({tail!r})\n'
+            + ('sys.stdout.write("\\n")\n' if newline else "")
+        )
+        bindir = self.tmp / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        exe = bindir / "memtest_vulkan"
+        exe.write_text(script)
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+        os.environ["PATH"] = str(bindir)
+
+    def test_target_not_listed_is_error_despite_passing_output(self):
+        """The regression: PASS text for device 0a:00 must not become PASS for 03:00."""
+        self._fake_memtest(["0a:00"], tail=self.PASS_TAIL)
+        result = gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, self.tmp / "mt.log")
+        self.assertEqual(result["status"], "ERROR")
+        self.assertIsNone(result["selected_index"])
+        self.assertIn("did not offer", result["reason"])
+        self.assertNotEqual(gpu_diag.classify(base_report(result["status"]))["overall"], "PASS")
+
+    def test_target_not_listed_is_error_despite_failing_output(self):
+        """The mirror image: another card's errors must not condemn the target."""
+        self._fake_memtest(["0a:00"], tail="Error found. Total errors 42")
+        result = gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, self.tmp / "mt.log")
+        self.assertEqual(result["status"], "ERROR")
+
+    def test_listed_target_is_selected_and_passes(self):
+        self._fake_memtest(["0a:00", "03:00"], tail=self.PASS_TAIL)
+        result = gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, self.tmp / "mt.log")
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["selected_index"], 2)
+        self.assertIsNone(result["reason"])
+
+    def test_non_zero_domain_target_still_matches(self):
+        """memtest_vulkan prints no domain; a domain != 0000 must not be excluded."""
+        self._fake_memtest(["03:00"], tail=self.PASS_TAIL)
+        result = gpu_diag.run_memtest_vulkan("0001:03:00.0", 5, self.tmp / "mt.log")
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["target_bus_device"], "03:00")
+
+    def test_ambiguous_target_is_error(self):
+        self._fake_memtest(["03:00", "03:00"], tail=self.PASS_TAIL)
+        result = gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, self.tmp / "mt.log")
+        self.assertEqual(result["status"], "ERROR")
+        self.assertIn("unambiguously", result["reason"])
+
+    def test_trailing_partial_line_is_not_duplicated(self):
+        """The summary often arrives without a trailing newline."""
+        log = self.tmp / "mt.log"
+        self._fake_memtest(["03:00"], tail=self.PASS_TAIL)
+        gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, log)
+        self.assertEqual(log.read_text().count(self.PASS_TAIL), 1)
+
+
+class TestReportDir(unittest.TestCase):
+    def test_unwritable_target_raises_diagerror(self):
+        """A read-only stick must produce an instruction, not a traceback."""
+        parent = Path(tempfile.mkdtemp())
+        os.chmod(parent, 0o500)
+        self.addCleanup(os.chmod, parent, 0o700)
+        with self.assertRaises(gpu_diag.DiagError) as ctx:
+            gpu_diag.choose_report_dir(str(parent / "reports"))
+        self.assertIn("--report-dir", str(ctx.exception))
+
+
+class TestNumericDelta(unittest.TestCase):
+    def test_counter_appearing_only_after_is_reported(self):
+        """A counter file that shows up during the run is evidence, not noise."""
+        delta = gpu_diag.numeric_delta({}, {"0000:00:01.0": {"aer_dev_fatal": {"CmpltTO": 7}}})
+        self.assertEqual(gpu_diag.positive_numbers(delta), [("/0000:00:01.0/aer_dev_fatal/CmpltTO", 7)])
+
+    def test_counter_present_before_and_after_uses_difference(self):
+        delta = gpu_diag.numeric_delta({"d": {"cor": {"BadTLP": 2}}}, {"d": {"cor": {"BadTLP": 5}}})
+        self.assertEqual(gpu_diag.positive_numbers(delta), [("/d/cor/BadTLP", 3)])
+
+    def test_counter_disappearing_is_not_a_positive_signal(self):
+        delta = gpu_diag.numeric_delta({"d": {"cor": {"BadTLP": 2}}}, {})
+        self.assertEqual(gpu_diag.positive_numbers(delta), [])
+
+    def test_new_counter_classifies_as_fail(self):
+        report = base_report("PASS", aer_delta=gpu_diag.numeric_delta({}, {"d": {"cor": {"BadTLP": 1}}}))
+        self.assertEqual(gpu_diag.classify(report)["overall"], "FAIL")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
