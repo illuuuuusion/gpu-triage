@@ -1,5 +1,12 @@
 # gpu-triage
 
+## Schnellstart
+
+1. Repository auf einem Windows-PC auschecken und einen Ventoy-Stick einstecken.
+2. In PowerShell im Repository `.\tools\prepare-usb.ps1` ausführen.
+3. Vom Stick booten und das bereitgestellte Arch-ISO im Ventoy-Menü wählen.
+4. In der Root-Shell die eine Zeile aus `BOOT.txt` eingeben.
+
 Offline-Diagnosewerkzeug für dedizierte Grafikkarten. gpu-triage sammelt auf einem
 separaten Diagnose-PC belastbare Belege zum Zustand einer GPU — PCI-Sichtbarkeit,
 Treiberbindung, PCIe-Link, Fehlerzähler, Telemetrie und ein begrenzter VRAM-Test —
@@ -14,6 +21,7 @@ und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 
 ## Inhalt
 
+- [Schnellstart](#schnellstart)
 - [Funktionsumfang](#funktionsumfang)
 - [Voraussetzungen](#voraussetzungen)
 - [Einrichtung](#einrichtung)
@@ -23,6 +31,7 @@ und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 - [Projektstruktur](#projektstruktur)
 - [Entwicklung](#entwicklung)
 - [Designentscheidungen](#designentscheidungen)
+- [Manueller Weg](#manueller-weg)
 - [Lizenz](#lizenz)
 
 ## Funktionsumfang
@@ -79,6 +88,7 @@ Repository spiegeln, Ergebnis prüfen, `BOOT.txt` schreiben. Kein Linux nötig.
 | `-Force` | alles erneut laden und prüfen, auch wenn es passend erscheint |
 | `-InstallVentoy` | Ventoy vorher installieren — **löscht das Ziellaufwerk** |
 | `-CacheDir` | Download-Cache (Standard: `%LOCALAPPDATA%\gpu-triage\cache`) |
+| `-ReleasePath` | alternative `release.json`, vor allem für isolierte Tests |
 
 Jeder Download wird gegen den Hash aus `release.json` geprüft und
 zwischengespeichert; ein zweiter Lauf lädt nichts erneut und ist damit auch der
@@ -94,112 +104,6 @@ zeigt Modell, Seriennummer und Größe an und verlangt die getippte Bestätigung
 > [.github/workflows/bundle.yml](.github/workflows/bundle.yml). Solange die
 > Datei nicht im Repository liegt, bleibt nur der manuelle Weg unten —
 > `prepare-usb.ps1` sagt das beim Start.
-
-### Der manuelle Weg
-
-Die folgenden Schritte bauen das Bundle selbst und kommen ohne GitHub aus.
-
-### 1. Ventoy installieren
-
-Ventoy auf den USB-Stick installieren. Der Stick erhält dadurch eine große,
-normal beschreibbare Datenpartition mit dem Label `Ventoy`.
-
-### 2. Offizielles Arch-ISO herunterladen
-
-```text
-archlinux-YYYY.MM.DD-x86_64.iso
-```
-
-Den Dateinamen **nicht ändern** — das enthaltene Datum bestimmt, gegen welchen
-Snapshot das Offline-Bundle gebaut wird.
-
-### 3. Repository klonen
-
-```bash
-git clone <repo-url> gpu-triage
-```
-
-### 4. Offline-Bundle bauen
-
-Auf einem Arch-System mit Internet — eine Arch-Installation, WSL2 oder schlicht
-ein Container:
-
-```bash
-cd gpu-triage
-sudo bash ./offline/build_bundle.sh /pfad/zu/archlinux-YYYY.MM.DD-x86_64.iso
-```
-
-```bash
-# gleichwertig, ohne eigenes Arch-System:
-docker run --rm -v "$PWD":/repo -v /pfad/zu/isos:/iso:ro -w /repo \
-  -e GPU_TRIAGE_OWNER="$(id -u):$(id -g)" archlinux:latest \
-  bash offline/build_bundle.sh /iso/archlinux-YYYY.MM.DD-x86_64.iso
-```
-
-Das Skript löst die Dependency-Closure gegen den Arch Linux Archive Snapshot zum
-ISO-Datum auf, lädt sie mit pacman und erzeugt:
-
-```text
-offline/packages/*.pkg.tar.zst          # was auf den Stick gehört
-offline/manifest.env                    # bindet das Bundle an die Kernelversion des ISOs
-offline/SHA256SUMS
-offline/excluded.txt                    # was das ISO schon mitbringt
-offline/dist/gpu-triage-bundle-*.zip    # dasselbe als ein Artefakt (+ .sha256)
-offline/.dlcache/                       # persistenter Download-Cache
-```
-
-Ausgeliefert wird nur, was das Live-System **nicht** schon hat: Das Skript liest
-`arch/pkglist.x86_64.txt` aus dem ISO und zieht jedes Paket ab, das dort mit
-exakt derselben Version steht. Für das ISO vom 2026.08.01 sind das 151 von 176
-Paketen — 372 MB statt 659 MB. Weicht eine Version ab, bleibt das Paket im
-Bundle; Sicherheit geht vor Größe.
-
-| Option | Wirkung |
-| --- | --- |
-| `--no-iso-subtract` | volle Closure ausliefern, nichts abziehen |
-| `--clean-cache` | Download-Cache vorher verwerfen |
-| `--keep-cache-only` | kein `offline/dist/*.zip` schreiben |
-
-Der Bau braucht weder `pacstrap` noch ein chroot, läuft also in einem gewöhnlichen
-Container ohne `--privileged`. pacman selbst besteht bei `-Sy`/`-Sw` auf uid 0,
-deshalb eskaliert das Skript per `sudo` — Datenbank, Cache, Log und Install-Root
-zeigen aber alle ins Repo, der Paketzustand des Build-Systems bleibt unberührt.
-
-> **Kernel-Kreuzprüfung.** Nennt das ISO eine andere `linux`-Version als der
-> Archive-Snapshot, bricht der Bau ab, statt einen `nvidia-open`-Stack für den
-> falschen Kernel zu bauen. Dieser Fehler fällt damit beim Bauen auf und nicht
-> erst beim Booten.
-
-### 5. Stick synchronisieren
-
-In PowerShell aus dem Repo-Verzeichnis:
-
-```powershell
-.\tools\sync-to-usb.ps1 -Drive E: -IsoPath C:\Downloads\archlinux-YYYY.MM.DD-x86_64.iso
-```
-
-`-IsoPath` ist optional und nur beim ersten Mal bzw. nach einem ISO-Wechsel nötig.
-Download-Cache und ZIP-Artefakt bleiben absichtlich zurück — auf den Stick gehört
-nur `offline/packages/`. Ergebnis:
-
-```text
-VENTOY_USB/
-├── archlinux-YYYY.MM.DD-x86_64.iso
-├── BOOT.txt                     # nur von prepare-usb.ps1: das Boot-Kommando
-└── gpu-triage/
-    ├── go.sh
-    ├── start.sh
-    ├── app/
-    ├── scripts/
-    ├── offline/
-    └── reports/
-```
-
-> **ISO und Bundle gehören zusammen.** Arch ist Rolling Release, und `nvidia-open`
-> enthält Kernelmodule für eine konkrete Kernelversion. `bootstrap.sh` vergleicht
-> `manifest.env` vor jeder Installation mit `uname -r` und bricht bei Abweichung ab,
-> statt einen unpassenden NVIDIA-Stack zu installieren. Nach einem ISO-Update muss
-> `build_bundle.sh` erneut laufen.
 
 ## Verwendung
 
@@ -320,6 +224,7 @@ gpu-triage/
 │   └── bootstrap.sh            # Offline-Runtime installieren, Treiber laden
 ├── offline/
 │   ├── build_bundle.sh         # baut das Offline-Paketbundle (Internet-PC)
+│   ├── bundle_helpers.sh       # testbare Subtraktions-/Dateinamenlogik
 │   ├── release_meta.py         # löst ISO-Release auf, schreibt/prüft release.json
 │   ├── release.json            # von CI erzeugt: pinnt ISO + Kernel + Bundle
 │   ├── package-list.txt        # bewusst kleine Runtime-Paketliste
@@ -363,11 +268,19 @@ Runtime-Pakete oder das verwendete Arch-ISO ändern.
 ### Tests
 
 Die Regressionstests benötigen keine echte GPU. Sie bauen Fake-sysfs-Bäume in
-temporären Verzeichnissen und nutzen ausschließlich die Standardbibliothek:
+temporären Verzeichnissen. Die Shell-Suite prüft zusätzlich Bundle-Subtraktion,
+`release.json`, Bootstrap-Stamp sowie Mount-/Remount-Routing von `go.sh`:
 
 ```bash
 python3 -m unittest discover -s tests -v
-bash tests/test_bootstrap_stamp.sh
+for test in tests/test_*.sh; do bash "$test"; done
+```
+
+Der Windows-Ablauf wird ohne USB-Hardware mit einem temporären `subst`-Laufwerk
+unter Windows PowerShell 5.1 geprüft:
+
+```powershell
+.\tests\test_prepare_usb.ps1
 ```
 
 Boot, Bootstrap, Paketverifikation und Reportausgabe lassen sich ohne Diagnose-PC
@@ -389,6 +302,113 @@ Ein eigenes gpu-triage-Live-ISO ist als späteres Release-Artefakt vorgesehen.
 **Abbrechen statt raten.** Passt das Bundle nicht zum laufenden Kernel, bricht der
 Bootstrap ab. Ein nicht durchgeführter Test wird als `WARN` ausgewiesen und nie
 als Erfolg gewertet.
+
+## Manueller Weg
+
+Dieser Rückfallweg baut das Bundle selbst und kommt ohne GitHub-Releases aus.
+Für den normalen Einstieg genügt der [Schnellstart](#schnellstart).
+
+### 1. Ventoy installieren
+
+Ventoy auf den USB-Stick installieren. Der Stick erhält dadurch eine große,
+normal beschreibbare Datenpartition mit dem Label `Ventoy`.
+
+### 2. Offizielles Arch-ISO herunterladen
+
+```text
+archlinux-YYYY.MM.DD-x86_64.iso
+```
+
+Den Dateinamen **nicht ändern** — das enthaltene Datum bestimmt, gegen welchen
+Snapshot das Offline-Bundle gebaut wird.
+
+### 3. Repository klonen
+
+```bash
+git clone <repo-url> gpu-triage
+```
+
+### 4. Offline-Bundle bauen
+
+Auf einem Arch-System mit Internet — eine Arch-Installation, WSL2 oder schlicht
+ein Container:
+
+```bash
+cd gpu-triage
+sudo bash ./offline/build_bundle.sh /pfad/zu/archlinux-YYYY.MM.DD-x86_64.iso
+```
+
+```bash
+# gleichwertig, ohne eigenes Arch-System:
+docker run --rm -v "$PWD":/repo -v /pfad/zu/isos:/iso:ro -w /repo \
+  -e GPU_TRIAGE_OWNER="$(id -u):$(id -g)" archlinux:latest \
+  bash offline/build_bundle.sh /iso/archlinux-YYYY.MM.DD-x86_64.iso
+```
+
+Das Skript löst die Dependency-Closure gegen den Arch Linux Archive Snapshot zum
+ISO-Datum auf, lädt sie mit pacman und erzeugt:
+
+```text
+offline/packages/*.pkg.tar.zst          # was auf den Stick gehört
+offline/manifest.env                    # bindet das Bundle an die Kernelversion des ISOs
+offline/SHA256SUMS
+offline/excluded.txt                    # was das ISO schon mitbringt
+offline/dist/gpu-triage-bundle-*.zip    # dasselbe als ein Artefakt (+ .sha256)
+offline/.dlcache/                       # persistenter Download-Cache
+```
+
+Ausgeliefert wird nur, was das Live-System **nicht** schon hat: Das Skript liest
+`arch/pkglist.x86_64.txt` aus dem ISO und zieht jedes Paket ab, das dort mit
+exakt derselben Version steht. Für das ISO vom 2026.08.01 sind das 151 von 176
+Paketen — 372 MB statt 659 MB. Weicht eine Version ab, bleibt das Paket im
+Bundle; Sicherheit geht vor Größe.
+
+| Option | Wirkung |
+| --- | --- |
+| `--no-iso-subtract` | volle Closure ausliefern, nichts abziehen |
+| `--clean-cache` | Download-Cache vorher verwerfen |
+| `--keep-cache-only` | kein `offline/dist/*.zip` schreiben |
+
+Der Bau braucht weder `pacstrap` noch ein chroot, läuft also in einem gewöhnlichen
+Container ohne `--privileged`. pacman selbst besteht bei `-Sy`/`-Sw` auf uid 0,
+deshalb eskaliert das Skript per `sudo` — Datenbank, Cache, Log und Install-Root
+zeigen aber alle ins Repo, der Paketzustand des Build-Systems bleibt unberührt.
+
+> **Kernel-Kreuzprüfung.** Nennt das ISO eine andere `linux`-Version als der
+> Archive-Snapshot, bricht der Bau ab, statt einen `nvidia-open`-Stack für den
+> falschen Kernel zu bauen. Dieser Fehler fällt damit beim Bauen auf und nicht
+> erst beim Booten.
+
+### 5. Stick synchronisieren
+
+In PowerShell aus dem Repo-Verzeichnis:
+
+```powershell
+.\tools\sync-to-usb.ps1 -Drive E: -IsoPath C:\Downloads\archlinux-YYYY.MM.DD-x86_64.iso
+```
+
+`-IsoPath` ist optional und nur beim ersten Mal bzw. nach einem ISO-Wechsel nötig.
+Download-Cache und ZIP-Artefakt bleiben absichtlich zurück — auf den Stick gehört
+nur `offline/packages/`. Ergebnis:
+
+```text
+VENTOY_USB/
+├── archlinux-YYYY.MM.DD-x86_64.iso
+├── BOOT.txt                     # nur von prepare-usb.ps1: das Boot-Kommando
+└── gpu-triage/
+    ├── go.sh
+    ├── start.sh
+    ├── app/
+    ├── scripts/
+    ├── offline/
+    └── reports/
+```
+
+> **ISO und Bundle gehören zusammen.** Arch ist Rolling Release, und `nvidia-open`
+> enthält Kernelmodule für eine konkrete Kernelversion. `bootstrap.sh` vergleicht
+> `manifest.env` vor jeder Installation mit `uname -r` und bricht bei Abweichung ab,
+> statt einen unpassenden NVIDIA-Stack zu installieren. Nach einem ISO-Update muss
+> `build_bundle.sh` erneut laufen.
 
 ## Lizenz
 

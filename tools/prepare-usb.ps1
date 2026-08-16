@@ -26,6 +26,10 @@
 .PARAMETER CacheDir
     Download cache. Default: %LOCALAPPDATA%\gpu-triage\cache
 
+.PARAMETER ReleasePath
+    Alternate release.json, primarily for isolated regression tests. By
+    default offline\release.json in this repository is used.
+
 .PARAMETER Force
     Re-verify and re-fetch even where the recorded state says everything is
     already in place.
@@ -49,6 +53,8 @@ param(
     [switch]$InstallVentoy,
 
     [string]$CacheDir,
+
+    [string]$ReleasePath,
 
     [switch]$Force,
 
@@ -77,7 +83,11 @@ try {
 } catch { }
 
 $RepoRoot      = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$ReleasePath   = Join-Path $RepoRoot 'offline\release.json'
+if (-not $ReleasePath) {
+    $ReleasePath = Join-Path $RepoRoot 'offline\release.json'
+} else {
+    $ReleasePath = [System.IO.Path]::GetFullPath($ReleasePath)
+}
 $OfflineDir    = Join-Path $RepoRoot 'offline'
 $SyncScript    = Join-Path $PSScriptRoot 'sync-to-usb.ps1'
 $VentoyPin     = Join-Path $PSScriptRoot 'ventoy-release.json'

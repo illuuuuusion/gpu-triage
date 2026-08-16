@@ -29,6 +29,7 @@ set -euo pipefail
 # PC installs only from those files and never contacts a mirror.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$REPO_ROOT/offline/bundle_helpers.sh"
 PKG_DIR="$REPO_ROOT/offline/packages"
 DL_CACHE="$REPO_ROOT/offline/.dlcache"
 DIST_DIR="$REPO_ROOT/offline/dist"
@@ -179,11 +180,8 @@ if [[ $ISO_SUBTRACT -eq 1 ]]; then
 Use --no-iso-subtract to build the full closure instead."
   fi
   [[ -s "$TMP/isopkgs.txt" ]] || die "arch/pkglist.x86_64.txt in the ISO is empty."
-  while read -r name version _; do
-    [[ -n "$name" && -n "$version" ]] || continue
-    ISO_PKGS["$name"]="$version"
-    ISO_PKG_COUNT=$((ISO_PKG_COUNT + 1))
-  done < "$TMP/isopkgs.txt"
+  bundle_load_iso_packages "$TMP/isopkgs.txt" ISO_PKGS
+  ISO_PKG_COUNT="$BUNDLE_ISO_PKG_COUNT"
   log "The ISO ships $ISO_PKG_COUNT packages."
 
   # The kernel is the one package where a version difference is fatal rather
@@ -201,34 +199,10 @@ matches the snapshot, or build with --no-iso-subtract and accept the mismatch."
 fi
 
 # --- split the closure ----------------------------------------------------
-: > "$TMP/keep.txt"
-: > "$EXCLUDED"
-DRIFT=0
-while read -r repo name version location; do
-  [[ -n "$name" ]] || continue
-  file="${location##*/}"
-  if [[ $ISO_SUBTRACT -eq 1 && -n "${ISO_PKGS[$name]:-}" ]]; then
-    if [[ "${ISO_PKGS[$name]}" == "$version" ]]; then
-      printf '%s %s\n' "$name" "$version" >> "$EXCLUDED"
-      continue
-    fi
-    # Same package, different version: keep it. Shipping a package the live
-    # system already has at another version is harmless; omitting one it does
-    # not have at all is not.
-    DRIFT=$((DRIFT + 1))
-  fi
-  printf '%s\t%s\t%s\t%s\n' "$repo" "$name" "$version" "$file" >> "$TMP/keep.txt"
-done < "$TMP/closure.txt"
-
-sort -o "$EXCLUDED" "$EXCLUDED"
-EXCLUDED_COUNT="$(wc -l < "$EXCLUDED")"
-KEEP_COUNT="$(wc -l < "$TMP/keep.txt")"
+bundle_split_closure "$TMP/closure.txt" ISO_PKGS "$ISO_SUBTRACT" "$TMP/keep.txt" "$EXCLUDED"
+EXCLUDED_COUNT="$BUNDLE_EXCLUDED_COUNT"
+KEEP_COUNT="$BUNDLE_KEEP_COUNT"
 [[ $KEEP_COUNT -gt 0 ]] || die "Nothing left to ship after subtracting the ISO packages."
-
-if [[ $DRIFT -gt 0 ]]; then
-  warn "$DRIFT package(s) exist on the ISO at a different version and are shipped anyway."
-  warn "A large number here means the ISO date and the archive snapshot do not line up."
-fi
 
 # --- assemble the bundle --------------------------------------------------
 log "Copying $KEEP_COUNT package(s) to $PKG_DIR..."
@@ -241,7 +215,7 @@ while IFS=$'\t' read -r _ name _ file; do
   # partition and unpacked by Expand-Archive. pacman reads name and version from
   # the package metadata rather than the filename, so renaming is safe as long
   # as the detached signature is renamed with it.
-  target="${file//:/_}"
+  target="$(bundle_windows_filename "$file")"
   if [[ "$target" != "$file" ]]; then
     RENAMED=$((RENAMED + 1))
   fi

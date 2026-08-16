@@ -32,20 +32,51 @@ GPU-Passthrough (VT-d/AMD-Vi) ist bewusst nicht Teil dieser Anleitung: Hyper-V
 PCIe-Link verfälscht genau die AER- und Link-Belege, um die es hier geht. Die
 Hardware-Messpfade gehören auf echtes Blech.
 
-## Zwei Wege durch dieses Dokument
+## Drei Wege durch dieses Dokument
 
-| | Weg 1 — Internet-VM | Weg 2 — Offline-Test |
-| --- | --- | --- |
-| Setup-Aufwand | Minuten | WSL2 oder Container + Bundle-Bau (~660 MB Download) |
-| Internet in der VM nötig | ja | nein — bewusst identisch zum echten Diagnose-PC |
-| Testet App-Logik (`gpu_diag.py`, Regressionstests) | ✅ | ✅ |
-| Testet Offline-Bootstrap (Prüfsummen, Kernel-Abgleich, USB-only-Install) | ❌ | ✅ |
-| Testet Ventoy-/Stick-Layout | ❌ | nur Variante B |
+| | Weg 0 — Release-Stick | Weg 1 — Internet-VM | Weg 2 — Bundle selbst bauen |
+| --- | --- | --- | --- |
+| Setup-Aufwand | ein PowerShell-Kommando | Minuten | WSL2 oder Container + Bundle-Bau (~660 MB Download) |
+| Internet in der VM nötig | nein | ja | nein — bewusst identisch zum echten Diagnose-PC |
+| Testet App-Logik (`gpu_diag.py`, Regressionstests) | ✅ | ✅ | ✅ |
+| Testet Offline-Bootstrap (Prüfsummen, Kernel-Abgleich, USB-only-Install) | ✅ | ❌ | ✅ |
+| Testet Ventoy-/Stick-Layout | ✅ | ❌ | nur Variante B |
 
 Für schnelle Code-Iteration reicht Weg 1. Vor jeder Änderung an
 `scripts/bootstrap.sh`, `offline/build_bundle.sh` oder `tools/sync-to-usb.ps1`
-sollte zusätzlich Weg 2 laufen — das sind genau die Skripte, die Weg 1 gar nicht
-anfasst.
+sollte zusätzlich Weg 0 oder Weg 2 laufen — das sind genau die Skripte, die
+Weg 1 gar nicht anfasst.
+
+---
+
+## Weg 0 — Veröffentlichtes Bundle verwenden, kein WSL2
+
+Wer die App- und Bootstrap-Logik gegen das veröffentlichte ISO-/Bundle-Paar
+testen will, muss das Bundle nicht selbst bauen. Voraussetzung ist lediglich,
+dass `offline/release.json` im ausgecheckten Stand vorhanden ist; sie verweist
+auf das vom CI-Workflow veröffentlichte, hash-geprüfte Release-Asset.
+
+Auf dem Windows-PC das Repository auschecken, einen Ventoy-Stick einstecken und
+in PowerShell ausführen:
+
+```powershell
+cd C:\dev\gpu-triage
+.\tools\prepare-usb.ps1
+.\tools\prepare-usb.ps1 -Check
+```
+
+Der erste Befehl lädt ISO und Bundle aus dem gepinnten Release, prüft beide
+Hashes, entpackt das Bundle und spiegelt das Repository. Der zweite Befehl
+prüft den fertigen Stick unabhängig vom gespeicherten Zustandsvermerk. Eine
+Arch-Installation, WSL2 oder ein Container ist für diesen Weg nicht beteiligt.
+
+Den Stick anschließend mit
+[Variante B](#variante-b--vollständiger-test-mit-echtem-ventoy-stick-virtualbox)
+in VirtualBox booten und bei
+[Schritt 2](#schritt-2--testablauf-im-live-system) fortfahren. Wer ausschließlich
+an `gpu_diag.py` arbeitet und weder Bootstrap noch Stick-Layout benötigt, kommt
+mit [Weg 1](#weg-1--github-repo-direkt-in-einer-internet-vm) noch schneller ans
+Ziel.
 
 ---
 
@@ -59,6 +90,7 @@ Ja, das geht, und es ist der schnellste Weg zu prüfen, ob eine Änderung
 maschinerie (`scripts/bootstrap.sh`). Die verweigert absichtlich den Dienst,
 wenn `offline/packages/` leer ist — der echte Diagnose-PC hat kein Internet und
 darf nie heimlich von einem Mirror nachladen. Für diesen Teil führt kein Weg an
+[Weg 0](#weg-0--veröffentlichtes-bundle-verwenden-kein-wsl2) oder
 [Weg 2](#weg-2--vollständiger-offline-test-identisch-zum-echten-diagnose-pc)
 vorbei.
 
@@ -100,7 +132,7 @@ cd gpu-triage
 bash start.sh list      # → "No display-class PCI GPUs found.", exit 2 — korrekt, keine echte GPU in der VM
 bash start.sh --help
 python3 -m unittest discover -s tests -v
-bash tests/test_bootstrap_stamp.sh
+for test in tests/test_*.sh; do bash "$test"; done
 ```
 
 Für einen **vollständigen** Report ganz ohne echte Hardware reicht die
@@ -397,10 +429,15 @@ Kein `[bootstrap]`-Ausgabeblock, keine sudo-Abfrage, keine Paketinstallation.
 ```bash
 cd /mnt/ventoy/gpu-triage
 python3 -m unittest discover -s tests -v
-bash tests/test_bootstrap_stamp.sh
+for test in tests/test_*.sh; do bash "$test"; done
 ```
 
-Erwartet: `Ran … tests … OK` und `bootstrap stamp tests: PASS`.
+Erwartet: `Ran … tests … OK` und alle Shell-Suiten mit `PASS`. Der
+PowerShell-Test für den Vorbereitungs-PC läuft separat unter Windows:
+
+```powershell
+.\tests\test_prepare_usb.ps1
+```
 
 #### 2.4 Bootstrap — der eigentliche VM-Test
 
@@ -536,7 +573,7 @@ SIGINT, Logdatei. Über echte VRAM-Gesundheit sagt lavapipe nichts aus, und
 | `mount: unknown filesystem type 'exfat'` | Falsche Partition erwischt → `lsblk -f` prüfen |
 | Bundle-Bau in WSL bricht ab | Repo liegt unter `/mnt/c` → ins Linux-Dateisystem (`~/`) klonen |
 | `bootstrap` bricht mit Exit 3 ab | ISO-Datum und Bundle passen nicht zusammen → `build_bundle.sh` gegen genau dieses ISO neu laufen lassen |
-| `Offline bundle is empty` | `offline/packages/` ist per `.gitignore` nicht in Git → Bundle bauen (Weg 2, Schritt 1) und per `sync-to-usb.ps1` übertragen |
+| `Offline bundle is empty` | `offline/packages/` ist per `.gitignore` nicht in Git → Release-Bundle mit `prepare-usb.ps1` holen (Weg 0) oder selbst bauen (Weg 2, Schritt 1) |
 | VirtualBox sieht die Raw-Disk nicht | VirtualBox nicht als Administrator gestartet |
 | Skripte scheitern an `\r` | Datei über einen Windows-Editor umgebrochen → `.gitattributes` erzwingt LF für `*.sh`; robocopy kopiert byteweise, andere Wege ggf. nicht |
 

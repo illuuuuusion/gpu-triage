@@ -661,47 +661,71 @@ Die Kandidatenermittlung ist einzeln geprüft, das Mounten selbst braucht Hardwa
 
 ---
 
-## Phase 5 — Dokumentation und Tests nachziehen
+## Phase 5 — Dokumentation und Tests nachziehen ✅ umgesetzt
+
+> **Stand nach Umsetzung.** Die vier neuen Regressionstest-Bereiche sind als
+> eigenständige, hardwarefreie Suiten vorhanden. Die Windows-Suite läuft unter
+> Windows PowerShell 5.1 gegen ein temporäres `subst`-Laufwerk; ISO und Bundle
+> sind synthetisch und werden vollständig über ihre echten Hashes geprüft.
+> README und VM-Anleitung führen jetzt zuerst über den Release-Weg, während der
+> manuelle Bundle-Bau als Rückfallweg am Dokumentende erhalten bleibt.
 
 ### 5.1 README umbauen
 
 Teilweise mit Phase 3/4 vorweggenommen, weil ein Werkzeug, das in der README nicht
-vorkommt, nicht existiert. Bereits erledigt:
+vorkommt, nicht existiert. Abschließend umgesetzt:
 
-- ✅ „Der kurze Weg: ein Kommando" mit Schaltertabelle, davor „Der manuelle Weg".
+- ✅ „Der kurze Weg: ein Kommando" mit Schaltertabelle vor dem manuellen Weg.
 - ✅ „Verwendung" führt die Einzeilen-Boot-Zeile und `go.sh`, inklusive des
   Device-Mapper-Hinweises aus 4.1.
 - ✅ Projektstruktur um `go.sh`, `tools/prepare-usb.ps1`,
   `tools/ventoy-release.json`, `offline/release.json`, `offline/release_meta.py`
   und den CI-Workflow ergänzt; Stick-Layout um `BOOT.txt` und `go.sh`.
 
-Offen bleibt der eigentliche Umbau:
-
-- Ein echter Abschnitt **„Schnellstart"** ganz oben — vier Zeilen, vor allem
-  anderen. Heute steht der kurze Weg zwar zuerst in „Einrichtung", aber wer die
-  Seite von oben liest, trifft erst auf Funktionsumfang und Voraussetzungen.
-- Der manuelle Weg rutscht ans Ende des Dokuments statt nur hinter den kurzen.
+- ✅ Ein echter Abschnitt **„Schnellstart"** steht unmittelbar unter dem Titel:
+  vier Schritte vom Checkout bis zur Zeile aus `BOOT.txt`.
+- ✅ Der manuelle Weg steht am Ende des Dokuments und ist aus dem primären
+  Einrichtungsfluss verschwunden.
 
 ### 5.2 Tests
 
-Zu den bestehenden Tests in [tests/](tests/) kommen dazu:
+Zu den bestehenden Tests in [tests/](tests/) kamen dazu:
 
-- `test_bundle_subtract.sh` — synthetische `pkglist.x86_64.txt` + synthetische
+- ✅ `test_bundle_subtract.sh` — synthetische `pkglist.x86_64.txt` + synthetische
   Paketliste; prüft, dass exakte Versionstreffer abgezogen und Abweichungen
-  behalten **und gemeldet** werden. Das ist die risikoreichste neue Logik.
-- `test_release_json.sh` — Schema und Pflichtfelder.
-- `prepare-usb.ps1` gegen ein Fake-Verzeichnis statt eines echten Sticks. Der
-  Aufbau dafür steht bereits: `subst` als Laufwerk, ein synthetisches
-  `release.json` und ein synthetisches Bundle im Cache genügen für Erstlauf,
-  Zweitlauf, `-Check` und die Fehlerbilder aus 3.5. In Phase 3 wurde das von Hand
-  gefahren — Phase 5 gießt es in ein Skript, damit es bei jeder Änderung läuft.
-- `go.sh`: Read-only-Remount und Kandidatenauswahl lassen sich mit
-  `unshare -rm` und einem Bind-Mount ohne Hardware prüfen, wie in 4.3 geschehen.
+  behalten **und gemeldet** werden. Zusätzlich ist die Epoch-Umbenennung für
+  Windows-Dateisysteme abgedeckt. Die echte Buildlogik liegt dafür in
+  `offline/bundle_helpers.sh` und wird sowohl vom Builder als auch vom Test
+  verwendet.
+- ✅ `test_release_json.sh` — Schema, Pflichtfelder, langlebige Archive-URL und
+  die Bindung von Name, Größe und SHA256 an das Release-Artefakt.
+- ✅ `test_prepare_usb.ps1` — `subst` als Laufwerk, synthetisches `release.json`
+  und synthetisches Bundle im Cache: Erstlauf, Zweitlauf ohne Download, `-Check`
+  sowie die Fehlerbilder fehlendes/falsches ISO, fehlendes Paket, falsches
+  Bundle-Datum, leerer Stick, fehlende Datei und zu neues Schema.
+- ✅ `test_go.sh` — Argumentweitergabe, echter Read-only-Bind-Mount mit Remount,
+  Kandidatenauswahl über ein kontrolliertes `lsblk` und der Hardware-fehlende
+  Fehlerpfad in einem privaten Mount-Namespace.
 
 ### 5.3 `TESTING-WINDOWS-VM.md`
 
-Neuer „Weg 0": Bundle aus dem Release ziehen statt bauen — für alle, die nur die
-App-Logik testen wollen, entfällt WSL2 damit ganz.
+✅ Neuer „Weg 0": `prepare-usb.ps1` zieht das Bundle aus dem Release statt es zu
+bauen. Der VM-Test kann damit ohne WSL2 direkt über einen vorbereiteten
+Ventoy-Stick beginnen.
+
+### 5.4 Akzeptanzkriterien Phase 5 — Ergebnis
+
+| Kriterium | Ergebnis |
+| --- | --- |
+| README beginnt mit vierstufigem Schnellstart | ✅ |
+| Manueller Bundle-Bau steht am Dokumentende | ✅ |
+| Exakte ISO-Pakete abziehen, Drift behalten und melden | ✅ synthetisch geprüft |
+| Epoch-Doppelpunkt für Windows bereinigen | ✅ synthetisch geprüft |
+| `release.json` vollständig und artefaktgebunden | ✅ 7 Positiv-/Fehlerfälle |
+| `prepare-usb.ps1`: Erstlauf, Zweitlauf, `-Check` | ✅ Windows PowerShell 5.1, `subst` |
+| `prepare-usb.ps1`: zentrale Fehlerbilder aus 3.5 | ✅ 9 Fehlerfälle |
+| `go.sh`: Read-only-Remount und Kandidatenwahl | ✅ privater Mount-Namespace |
+| Bestehende Regressionstests | ✅ 39 unittests + Stamp-Tests |
 
 **Aufwand:** ~0,5 Tag.
 
@@ -717,16 +741,16 @@ App-Logik testen wollen, entfällt WSL2 damit ganz.
 | ~~4 (1+2)~~ | ✅ ein Kommando beim Booten | — | 2 h (erledigt) | — |
 | ~~3.3~~ | ✅ `-InstallVentoy` | 3.1 | in 3.1 enthalten | **hoch**, opt-in |
 | ~~4 (3)~~ | ⛔ Auto-Start via Boot-Parameter | 4.2 | 2 h Verifikation | verworfen, siehe 4.2 |
-| 5 | Doku + Tests | 1–4 | 0,5 d | niedrig |
+| ~~5~~ | ✅ Doku + Tests | 1–4 | 0,5 d (erledigt) | — |
 
 **Ergebnis:** Die volle Vereinfachung steht — 7 Schritte auf dem Vorbereitungs-PC
 sind einer geworden, eine Linux-Umgebung braucht nur noch, wer das Bundle selbst
 bauen will. Auf dem Diagnose-PC ist aus drei Zeilen eine geworden; die verbleibende
 Zeile ist die, die sich nicht wegoptimieren lässt (4.2).
 
-Offen ist damit nur noch Phase 5. Zwei Nachweise hängen weiterhin an Dingen, die
-dieses Repository nicht selbst herstellen kann: der erste echte CI-Lauf (Phase 2)
-und ein Lauf gegen echte Hardware (Phase 3.3, 4.1).
+Alle geplanten Phasen sind damit umgesetzt. Zwei Nachweise hängen weiterhin an
+Dingen, die dieses Repository nicht selbst herstellen kann: der erste echte
+CI-Lauf (Phase 2) und ein Lauf gegen echte Hardware (Phase 3.3, 4.1).
 
 ## Risiken und offene Verifikationen
 
