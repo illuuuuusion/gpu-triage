@@ -6,7 +6,9 @@ offline/packages/*.pkg.tar.*
 offline/packages/*.sig
 offline/SHA256SUMS
 offline/manifest.env
-offline/.bundle-root/
+offline/excluded.txt
+offline/dist/
+offline/.dlcache/
 
 # Diagnostic output
 reports/*

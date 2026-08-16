@@ -82,24 +82,54 @@ git clone <repo-url> gpu-triage
 
 ### 4. Offline-Bundle bauen
 
-Auf dem internetfähigen Arch-System:
+Auf einem Arch-System mit Internet — eine Arch-Installation, WSL2 oder schlicht
+ein Container:
 
 ```bash
 cd gpu-triage
 sudo bash ./offline/build_bundle.sh /pfad/zu/archlinux-YYYY.MM.DD-x86_64.iso
 ```
 
-Das Skript nutzt den Arch Linux Archive Snapshot zum ISO-Datum, löst eine
-vollständige Dependency-Closure auf und erzeugt:
-
-```text
-offline/packages/*.pkg.tar.zst
-offline/manifest.env     # bindet das Bundle an die Kernelversion des ISOs
-offline/SHA256SUMS
+```bash
+# gleichwertig, ohne eigenes Arch-System:
+docker run --rm -v "$PWD":/repo -v /pfad/zu/isos:/iso:ro -w /repo \
+  -e GPU_TRIAGE_OWNER="$(id -u):$(id -g)" archlinux:latest \
+  bash offline/build_bundle.sh /iso/archlinux-YYYY.MM.DD-x86_64.iso
 ```
 
-Kernel- und Basisabhängigkeiten sind absichtlich enthalten. Ein reproduzierbarer
-Offline-Start wiegt hier schwerer als Speicherplatz.
+Das Skript löst die Dependency-Closure gegen den Arch Linux Archive Snapshot zum
+ISO-Datum auf, lädt sie mit pacman und erzeugt:
+
+```text
+offline/packages/*.pkg.tar.zst          # was auf den Stick gehört
+offline/manifest.env                    # bindet das Bundle an die Kernelversion des ISOs
+offline/SHA256SUMS
+offline/excluded.txt                    # was das ISO schon mitbringt
+offline/dist/gpu-triage-bundle-*.zip    # dasselbe als ein Artefakt (+ .sha256)
+offline/.dlcache/                       # persistenter Download-Cache
+```
+
+Ausgeliefert wird nur, was das Live-System **nicht** schon hat: Das Skript liest
+`arch/pkglist.x86_64.txt` aus dem ISO und zieht jedes Paket ab, das dort mit
+exakt derselben Version steht. Für das ISO vom 2026.08.01 sind das 151 von 176
+Paketen — 372 MB statt 659 MB. Weicht eine Version ab, bleibt das Paket im
+Bundle; Sicherheit geht vor Größe.
+
+| Option | Wirkung |
+| --- | --- |
+| `--no-iso-subtract` | volle Closure ausliefern, nichts abziehen |
+| `--clean-cache` | Download-Cache vorher verwerfen |
+| `--keep-cache-only` | kein `offline/dist/*.zip` schreiben |
+
+Der Bau braucht weder `pacstrap` noch ein chroot, läuft also in einem gewöhnlichen
+Container ohne `--privileged`. pacman selbst besteht bei `-Sy`/`-Sw` auf uid 0,
+deshalb eskaliert das Skript per `sudo` — Datenbank, Cache, Log und Install-Root
+zeigen aber alle ins Repo, der Paketzustand des Build-Systems bleibt unberührt.
+
+> **Kernel-Kreuzprüfung.** Nennt das ISO eine andere `linux`-Version als der
+> Archive-Snapshot, bricht der Bau ab, statt einen `nvidia-open`-Stack für den
+> falschen Kernel zu bauen. Dieser Fehler fällt damit beim Bauen auf und nicht
+> erst beim Booten.
 
 ### 5. Stick synchronisieren
 
@@ -110,7 +140,8 @@ In PowerShell aus dem Repo-Verzeichnis:
 ```
 
 `-IsoPath` ist optional und nur beim ersten Mal bzw. nach einem ISO-Wechsel nötig.
-Ergebnis auf dem Stick:
+Download-Cache und ZIP-Artefakt bleiben absichtlich zurück — auf den Stick gehört
+nur `offline/packages/`. Ergebnis:
 
 ```text
 VENTOY_USB/
@@ -229,7 +260,10 @@ gpu-triage/
 │   ├── package-list.txt        # bewusst kleine Runtime-Paketliste
 │   ├── packages/               # generiert, nicht in Git
 │   ├── manifest.env            # generiert, bindet Bundle an ISO-Kernel
-│   └── SHA256SUMS              # generiert
+│   ├── SHA256SUMS              # generiert
+│   ├── excluded.txt            # generiert, vom ISO bereitgestellte Pakete
+│   ├── dist/                   # generiert, Bundle als ZIP-Artefakt
+│   └── .dlcache/               # generiert, Download-Cache (nicht auf den Stick)
 ├── tools/
 │   └── sync-to-usb.ps1         # Windows: Repo und ISO auf den Ventoy-Stick
 ├── tests/                      # Regressionstests, keine GPU erforderlich

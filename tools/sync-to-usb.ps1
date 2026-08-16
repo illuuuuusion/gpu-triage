@@ -18,8 +18,11 @@ if (-not (Test-Path "$Drive\")) {
 Write-Host "Syncing repository to $Target"
 New-Item -ItemType Directory -Force -Path $Target | Out-Null
 
-# /MIR keeps the USB copy aligned with the repo. Runtime outputs and .git are excluded.
-$null = robocopy $Repo $Target /MIR /XD '.git' 'reports' '.bundle-root' /XF '*.iso' /NFL /NDL /NJH /NJS
+# /MIR keeps the USB copy aligned with the repo. Excluded are .git, runtime
+# outputs, and the two build artifacts that must never reach the stick: the
+# package download cache holds the full dependency closure and 'dist' holds a
+# second, zipped copy of the very packages already synced under offline/packages.
+$null = robocopy $Repo $Target /MIR /XD '.git' 'reports' '.dlcache' 'dist' /XF '*.iso' /NFL /NDL /NJH /NJS
 if ($LASTEXITCODE -ge 8) {
     throw "robocopy failed with exit code $LASTEXITCODE"
 }

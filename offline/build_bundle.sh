@@ -1,28 +1,70 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the complete offline package set for a specific official Arch ISO date.
-# Run on an Internet-connected Arch Linux installation/VM/WSL environment.
+# Build the offline package set for a specific official Arch ISO date.
 #
 # Usage:
-#   ./offline/build_bundle.sh /path/to/archlinux-2026.08.01-x86_64.iso
+#   ./offline/build_bundle.sh [options] /path/to/archlinux-2026.08.01-x86_64.iso
 #
-# The script uses the Arch Linux Archive snapshot matching the ISO filename date,
-# installs the minimal runtime into a temporary root with pacstrap, and keeps every
-# downloaded package in offline/packages/. The diagnostic PC later installs only
-# from those files and never contacts a mirror.
+# Options:
+#   --no-iso-subtract   ship the full dependency closure, including packages the
+#                       live ISO already provides
+#   --clean-cache       discard the persistent download cache before building
+#   --keep-cache-only   do not write offline/dist/*.zip
+#
+# Environment:
+#   GPU_TRIAGE_OWNER    uid:gid to hand the generated files to (default: the
+#                       user behind sudo). Useful when building in a container.
+#
+# The script resolves the dependency closure against the Arch Linux Archive
+# snapshot matching the ISO filename date and downloads it with pacman. There is
+# no pacstrap and no chroot, so it runs in a plain unprivileged container image
+# and in CI. pacman itself still insists on uid 0 for -Sy/-Sw, so the script
+# re-executes under sudo — but every pacman path (database, package cache, log,
+# install root) is redirected into this repository, so the build never reads or
+# modifies the host system's package state.
+#
+# What ends up on the USB stick is the closure minus everything the ISO already
+# has installed, read from the ISO's own arch/pkglist.x86_64.txt. The diagnostic
+# PC installs only from those files and never contacts a mirror.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_DIR="$REPO_ROOT/offline/packages"
-ROOT_DIR="$REPO_ROOT/offline/.bundle-root"
+DL_CACHE="$REPO_ROOT/offline/.dlcache"
+DIST_DIR="$REPO_ROOT/offline/dist"
 LIST_FILE="$REPO_ROOT/offline/package-list.txt"
 MANIFEST="$REPO_ROOT/offline/manifest.env"
-ISO_PATH="${1:-}"
+EXCLUDED="$REPO_ROOT/offline/excluded.txt"
+
+ISO_PATH=""
+ISO_SUBTRACT=1
+CLEAN_CACHE=0
+WRITE_DIST=1
+ALL_ARGS=("$@")
 
 log() { printf '[bundle] %s\n' "$*"; }
+warn() { printf '[bundle] WARNING: %s\n' "$*" >&2; }
 die() { printf '[bundle] ERROR: %s\n' "$*" >&2; exit 2; }
 
-[[ -n "$ISO_PATH" ]] || die "Usage: $0 /path/to/archlinux-YYYY.MM.DD-x86_64.iso"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-iso-subtract) ISO_SUBTRACT=0 ;;
+    --clean-cache) CLEAN_CACHE=1 ;;
+    --keep-cache-only) WRITE_DIST=0 ;;
+    -h | --help)
+      sed -n '/^# Build the offline/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    -*) die "Unknown option: $1" ;;
+    *)
+      [[ -z "$ISO_PATH" ]] || die "Expected exactly one ISO path"
+      ISO_PATH="$1"
+      ;;
+  esac
+  shift
+done
+
+[[ -n "$ISO_PATH" ]] || die "Usage: $0 [options] /path/to/archlinux-YYYY.MM.DD-x86_64.iso"
 [[ -f "$ISO_PATH" ]] || die "ISO not found: $ISO_PATH"
 [[ -f "$LIST_FILE" ]] || die "Package list missing: $LIST_FILE"
 
@@ -35,36 +77,39 @@ fi
 ARCHISO_DATE="$YEAR.$MONTH.$DAY"
 ARCHIVE_DATE="$YEAR/$MONTH/$DAY"
 
+# pacman refuses -Sy and -Sw for non-root regardless of where its paths point,
+# so escalate after the arguments have been validated. Nothing below writes
+# outside this repository and the temporary directory.
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  command -v sudo >/dev/null 2>&1 || die "sudo is required"
-  exec sudo -E "$0" "$@"
+  command -v sudo >/dev/null 2>&1 || die "pacman requires root for -Sy/-Sw; run this as root."
+  exec sudo -E "$0" "${ALL_ARGS[@]}"
 fi
 
-command -v pacman >/dev/null 2>&1 || die "Run this on Arch Linux."
-# Sync only, never -u: this only needs two specific packages current, not a
-# full upgrade of the host. A -Syu here previously turned an unrelated,
-# already-installed package's signature hiccup into a hard blocker for the
-# unrelated task of building the bundle.
-pacman -Sy --needed --noconfirm arch-install-scripts archlinux-keyring
-command -v pacstrap >/dev/null 2>&1 || die "pacstrap not available"
+command -v pacman >/dev/null 2>&1 || die "Run this on Arch Linux (or in an archlinux container)."
+command -v bsdtar >/dev/null 2>&1 || die "bsdtar is required (package: libarchive)."
 
 mapfile -t TARGETS < <(grep -Ev '^\s*(#|$)' "$LIST_FILE")
 [[ ${#TARGETS[@]} -gt 0 ]] || die "Package list is empty"
 
-rm -rf "$ROOT_DIR"
-mkdir -p "$ROOT_DIR" "$PKG_DIR"
+TMP="$(mktemp -d)"
+cleanup() { rm -rf "$TMP"; }
+trap cleanup EXIT
+
+[[ $CLEAN_CACHE -eq 1 ]] && { log "Discarding download cache."; rm -rf "$DL_CACHE"; }
+mkdir -p "$PKG_DIR" "$DL_CACHE" "$TMP/db/local" "$TMP/root"
 find "$PKG_DIR" -maxdepth 1 -type f ! -name .gitkeep -delete
 
-PACCONF="$(mktemp)"
-trap 'rm -f "$PACCONF"' EXIT
+# An empty --dbpath means pacman sees an empty local database and therefore
+# resolves the *complete* closure instead of skipping what the build host
+# happens to have installed. --logfile and --cachedir keep the build out of
+# /var, which is what makes the unprivileged run possible.
+PACCONF="$TMP/pacman.conf"
 cat > "$PACCONF" <<CONF
 [options]
-Architecture = auto
-CheckSpace
+Architecture = x86_64
 ParallelDownloads = 5
 SigLevel = Required DatabaseOptional
 LocalFileSigLevel = Optional
-CacheDir = $PKG_DIR
 
 [core]
 Server = https://archive.archlinux.org/repos/$ARCHIVE_DATE/\$repo/os/\$arch
@@ -73,15 +118,145 @@ Server = https://archive.archlinux.org/repos/$ARCHIVE_DATE/\$repo/os/\$arch
 Server = https://archive.archlinux.org/repos/$ARCHIVE_DATE/\$repo/os/\$arch
 CONF
 
+pac() {
+  pacman --config "$PACCONF" --dbpath "$TMP/db" --root "$TMP/root" \
+         --cachedir "$DL_CACHE" --logfile "$TMP/pacman.log" "$@"
+}
+
 log "Building bundle against Arch archive snapshot $ARCHISO_DATE..."
-log "This intentionally downloads a complete dependency closure; size is secondary to offline reliability."
 
-# base + linux mirror the live environment fundamentals; targets add GPU runtime.
-# -M keeps the host mirrorlist out of the temporary root; the custom archive config is used instead.
-pacstrap -C "$PACCONF" -M "$ROOT_DIR" base linux "${TARGETS[@]}"
+log "Syncing package databases from the archive snapshot..."
+pac -Sy --noconfirm >/dev/null || die "Could not sync the archive snapshot for $ARCHISO_DATE."
 
-EXPECTED_KERNEL="$(find "$ROOT_DIR/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | grep -E '^[0-9].*-arch' | sort -V | tail -n1 || true)"
-[[ -n "$EXPECTED_KERNEL" ]] || die "Could not determine expected Arch kernel from bundle root"
+# base + linux model the live environment fundamentals; the package list adds the
+# GPU runtime on top. Nearly all of base/linux is subtracted again below — it is
+# resolved so that the closure is complete before anything is removed from it.
+ALL_TARGETS=(base linux "${TARGETS[@]}")
+
+log "Resolving dependency closure..."
+if ! pac -Sp --print-format '%r %n %v %l' --noconfirm "${ALL_TARGETS[@]}" > "$TMP/closure.txt"; then
+  die "Dependency resolution failed against snapshot $ARCHISO_DATE."
+fi
+[[ -s "$TMP/closure.txt" ]] || die "Dependency resolution produced an empty closure."
+CLOSURE_COUNT="$(wc -l < "$TMP/closure.txt")"
+log "Closure: $CLOSURE_COUNT packages."
+
+# Download the full closure. Only a subset is shipped, but resolving and
+# downloading the whole set keeps this identical to what the live system would
+# need if the ISO ever provided less than its package list claims. The cache is
+# persistent, so a rebuild for the same snapshot re-downloads nothing.
+log "Downloading packages (cache: $DL_CACHE)..."
+# No host package is touched to make this work, so a stale keyring surfaces here
+# rather than being silently repaired behind the user's back.
+pac -Sw --noconfirm "${ALL_TARGETS[@]}" || die "Package download failed.
+If pacman rejected signatures, the build system's keyring is older than the
+snapshot: run 'sudo pacman -Sy archlinux-keyring' and try again."
+
+# --- kernel version -------------------------------------------------------
+# Read the module directory name straight out of the kernel package. That string
+# is exactly what uname -r reports in the live system, so no version-string
+# heuristic is needed.
+LINUX_VERSION="$(awk '$2 == "linux" { print $3 }' "$TMP/closure.txt")"
+[[ -n "$LINUX_VERSION" ]] || die "The closure contains no 'linux' package."
+LINUX_FILE="$(awk '$2 == "linux" { n = split($4, p, "/"); print p[n] }' "$TMP/closure.txt")"
+[[ -f "$DL_CACHE/$LINUX_FILE" ]] || die "Kernel package not in cache: $LINUX_FILE"
+
+# sort -u rather than head -n1: head would close the pipe early and leave bsdtar
+# with SIGPIPE, and it would hide a kernel package carrying two module trees.
+mapfile -t KERNEL_DIRS < <(bsdtar -tf "$DL_CACHE/$LINUX_FILE" \
+  | sed -n 's|^usr/lib/modules/\([^/]*\)/.*|\1|p' | sort -u)
+[[ ${#KERNEL_DIRS[@]} -eq 1 ]] \
+  || die "Expected exactly one module directory in $LINUX_FILE, found ${#KERNEL_DIRS[@]}: ${KERNEL_DIRS[*]:-none}"
+EXPECTED_KERNEL="${KERNEL_DIRS[0]}"
+
+# --- ISO package list -----------------------------------------------------
+declare -A ISO_PKGS=()
+ISO_PKG_COUNT=0
+if [[ $ISO_SUBTRACT -eq 1 ]]; then
+  log "Reading the package list out of $ISO_NAME..."
+  if ! bsdtar -xOf "$ISO_PATH" arch/pkglist.x86_64.txt > "$TMP/isopkgs.txt" 2>"$TMP/isoerr.txt"; then
+    die "Could not read arch/pkglist.x86_64.txt from the ISO: $(tr -d '\n' < "$TMP/isoerr.txt")
+Use --no-iso-subtract to build the full closure instead."
+  fi
+  [[ -s "$TMP/isopkgs.txt" ]] || die "arch/pkglist.x86_64.txt in the ISO is empty."
+  while read -r name version _; do
+    [[ -n "$name" && -n "$version" ]] || continue
+    ISO_PKGS["$name"]="$version"
+    ISO_PKG_COUNT=$((ISO_PKG_COUNT + 1))
+  done < "$TMP/isopkgs.txt"
+  log "The ISO ships $ISO_PKG_COUNT packages."
+
+  # The kernel is the one package where a version difference is fatal rather
+  # than merely wasteful: nvidia-open builds modules for one exact kernel.
+  ISO_LINUX="${ISO_PKGS[linux]:-}"
+  if [[ -z "$ISO_LINUX" ]]; then
+    warn "The ISO package list contains no 'linux' entry; the kernel cross-check is skipped."
+  elif [[ "$ISO_LINUX" != "$LINUX_VERSION" ]]; then
+    die "Kernel mismatch between ISO and archive snapshot.
+  ISO $ISO_NAME ships: linux $ISO_LINUX
+  Snapshot $ARCHISO_DATE has: linux $LINUX_VERSION
+The NVIDIA modules would be built for the wrong kernel. Use the ISO whose date
+matches the snapshot, or build with --no-iso-subtract and accept the mismatch."
+  fi
+fi
+
+# --- split the closure ----------------------------------------------------
+: > "$TMP/keep.txt"
+: > "$EXCLUDED"
+DRIFT=0
+while read -r repo name version location; do
+  [[ -n "$name" ]] || continue
+  file="${location##*/}"
+  if [[ $ISO_SUBTRACT -eq 1 && -n "${ISO_PKGS[$name]:-}" ]]; then
+    if [[ "${ISO_PKGS[$name]}" == "$version" ]]; then
+      printf '%s %s\n' "$name" "$version" >> "$EXCLUDED"
+      continue
+    fi
+    # Same package, different version: keep it. Shipping a package the live
+    # system already has at another version is harmless; omitting one it does
+    # not have at all is not.
+    DRIFT=$((DRIFT + 1))
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$repo" "$name" "$version" "$file" >> "$TMP/keep.txt"
+done < "$TMP/closure.txt"
+
+sort -o "$EXCLUDED" "$EXCLUDED"
+EXCLUDED_COUNT="$(wc -l < "$EXCLUDED")"
+KEEP_COUNT="$(wc -l < "$TMP/keep.txt")"
+[[ $KEEP_COUNT -gt 0 ]] || die "Nothing left to ship after subtracting the ISO packages."
+
+if [[ $DRIFT -gt 0 ]]; then
+  warn "$DRIFT package(s) exist on the ISO at a different version and are shipped anyway."
+  warn "A large number here means the ISO date and the archive snapshot do not line up."
+fi
+
+# --- assemble the bundle --------------------------------------------------
+log "Copying $KEEP_COUNT package(s) to $PKG_DIR..."
+declare -A SEEN_FILES=()
+RENAMED=0
+while IFS=$'\t' read -r _ name _ file; do
+  [[ -f "$DL_CACHE/$file" ]] || die "Package missing from cache: $file ($name)"
+  # A package with an epoch carries a colon in its filename, and exFAT and NTFS
+  # reject that — the bundle has to survive being copied onto the Ventoy data
+  # partition and unpacked by Expand-Archive. pacman reads name and version from
+  # the package metadata rather than the filename, so renaming is safe as long
+  # as the detached signature is renamed with it.
+  target="${file//:/_}"
+  if [[ "$target" != "$file" ]]; then
+    RENAMED=$((RENAMED + 1))
+  fi
+  [[ -z "${SEEN_FILES[$target]:-}" ]] || die "Filename collision after sanitising: $target"
+  SEEN_FILES["$target"]=1
+  cp -f "$DL_CACHE/$file" "$PKG_DIR/$target"
+  # Signatures are not covered by SHA256SUMS, but pacman -U reads them when they
+  # sit next to the package, so they travel along.
+  if [[ -f "$DL_CACHE/$file.sig" ]]; then
+    cp -f "$DL_CACHE/$file.sig" "$PKG_DIR/$target.sig"
+  fi
+done < "$TMP/keep.txt"
+if [[ $RENAMED -gt 0 ]]; then
+  log "Renamed $RENAMED package file(s) containing an epoch colon for Windows filesystems."
+fi
 
 BUNDLE_CREATED="$(date --iso-8601=seconds)"
 cat > "$MANIFEST" <<MANIFEST
@@ -89,6 +264,8 @@ cat > "$MANIFEST" <<MANIFEST
 ARCHISO_DATE='$ARCHISO_DATE'
 EXPECTED_KERNEL='$EXPECTED_KERNEL'
 BUNDLE_CREATED='$BUNDLE_CREATED'
+ISO_SUBTRACT='$ISO_SUBTRACT'
+BUNDLE_PACKAGES='$KEEP_COUNT'
 MANIFEST
 
 (
@@ -96,10 +273,40 @@ MANIFEST
   find packages -maxdepth 1 -type f -name '*.pkg.tar.zst' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
 )
 
+BUNDLE_SIZE="$(du -sh "$PKG_DIR" | awk '{print $1}')"
+
+if [[ $WRITE_DIST -eq 1 ]]; then
+  mkdir -p "$DIST_DIR"
+  ZIP_NAME="gpu-triage-bundle-$ARCHISO_DATE.zip"
+  rm -f "$DIST_DIR/$ZIP_NAME" "$DIST_DIR/$ZIP_NAME.sha256"
+  # ZIP rather than tar.zst on purpose: Expand-Archive exists on every Windows
+  # box, a zstd-capable tar does not. The packages are already compressed, so
+  # the archive only wraps them.
+  (
+    cd "$REPO_ROOT/offline"
+    bsdtar --format zip --options zip:compression=store \
+           -cf "$DIST_DIR/$ZIP_NAME" packages manifest.env SHA256SUMS excluded.txt
+  )
+  (
+    cd "$DIST_DIR"
+    sha256sum "$ZIP_NAME" > "$ZIP_NAME.sha256"
+  )
+fi
+
+# Root built it, but the repository belongs to whoever invoked the script.
+OWNER="${GPU_TRIAGE_OWNER:-}"
+if [[ -z "$OWNER" && -n "${SUDO_UID:-}" ]]; then
+  OWNER="$SUDO_UID:${SUDO_GID:-$SUDO_UID}"
+fi
+if [[ -n "$OWNER" ]]; then
+  chown -R "$OWNER" "$PKG_DIR" "$DL_CACHE" "$MANIFEST" "$EXCLUDED" \
+        "$REPO_ROOT/offline/SHA256SUMS" 2>/dev/null || true
+  [[ -d "$DIST_DIR" ]] && chown -R "$OWNER" "$DIST_DIR" 2>/dev/null || true
+fi
+
 log "Bundle complete."
 log "Expected live kernel: $EXPECTED_KERNEL"
-log "Packages: $(find "$PKG_DIR" -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)"
-log "Size: $(du -sh "$PKG_DIR" | awk '{print $1}')"
+log "Closure: $CLOSURE_COUNT | shipped: $KEEP_COUNT | provided by the ISO: $EXCLUDED_COUNT"
+log "Size: $BUNDLE_SIZE"
 log "Manifest: $MANIFEST"
-rm -rf "$ROOT_DIR"
-log "Temporary bundle root removed."
+[[ $WRITE_DIST -eq 1 ]] && log "Artifact: $DIST_DIR/$ZIP_NAME"

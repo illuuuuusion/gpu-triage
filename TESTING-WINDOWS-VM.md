@@ -36,7 +36,7 @@ Hardware-Messpfade gehören auf echtes Blech.
 
 | | Weg 1 — Internet-VM | Weg 2 — Offline-Test |
 | --- | --- | --- |
-| Setup-Aufwand | Minuten | WSL2 + Bundle-Bau (GB-Download) |
+| Setup-Aufwand | Minuten | WSL2 oder Container + Bundle-Bau (~660 MB Download) |
 | Internet in der VM nötig | ja | nein — bewusst identisch zum echten Diagnose-PC |
 | Testet App-Logik (`gpu_diag.py`, Regressionstests) | ✅ | ✅ |
 | Testet Offline-Bootstrap (Prüfsummen, Kernel-Abgleich, USB-only-Install) | ❌ | ✅ |
@@ -211,12 +211,19 @@ Danach in der Arch-WSL-Shell:
 ```bash
 sudo pacman-key --init
 sudo pacman-key --populate archlinux
-sudo pacman -Syu --needed git arch-install-scripts
+sudo pacman -Syu --needed git archlinux-keyring
 ```
 
-> **Wichtig:** Das Repo muss im **Linux-Dateisystem** liegen, nicht unter `/mnt/c`.
-> `pacstrap` legt Symlinks, Hardlinks und Dateien mit Unix-Rechten an; auf dem
-> Windows-Laufwerk (DrvFs) bricht der Bau ab oder erzeugt ein kaputtes Bundle.
+`archlinux-keyring` muss aktuell sein: Der Bundle-Bau prüft die Signaturen der
+Pakete aus dem Archive-Snapshot und fasst dafür bewusst **kein** Paket des
+Build-Systems an. Ist der Keyring veraltet, scheitert der Download mit einem
+entsprechenden Hinweis.
+
+> **Empfehlung:** Repo und ISO ins **Linux-Dateisystem** legen, nicht unter
+> `/mnt/c`. Zwingend ist das seit dem Wegfall von `pacstrap` nicht mehr — der Bau
+> lädt nur noch Pakete und kopiert Dateien — aber DrvFs ist für einige hundert
+> Paketdateien spürbar langsam, und `chown` auf die erzeugten Dateien läuft dort
+> ins Leere.
 
 ```bash
 cd ~
@@ -229,19 +236,23 @@ cp /mnt/c/Users/<DeinName>/Downloads/archlinux-2026.08.01-x86_64.iso ~/
 sudo bash ./offline/build_bundle.sh ~/archlinux-2026.08.01-x86_64.iso
 ```
 
-Der Lauf lädt mehrere GB. Am Ende meldet das Skript den erwarteten Kernel:
+Der erste Lauf lädt die vollständige Closure (rund 660 MB); der Cache unter
+`offline/.dlcache/` macht jeden weiteren Lauf gegen dasselbe ISO-Datum fast
+kostenlos. Am Ende meldet das Skript den erwarteten Kernel und was tatsächlich
+auf den Stick geht:
 
 ```text
 [bundle] Bundle complete.
-[bundle] Expected live kernel: 6.16.1-arch1-1
-[bundle] Packages: 1xx
+[bundle] Expected live kernel: 7.1.5-arch1-2
+[bundle] Closure: 176 | shipped: 25 | provided by the ISO: 151
+[bundle] Size: 372M
 ```
 
 Anschließend den Repo-Stand nach Windows spiegeln — entweder per Kopie oder
-direkt über den WSL-UNC-Pfad:
+direkt über den WSL-UNC-Pfad. Cache und ZIP-Artefakt bleiben dabei außen vor:
 
 ```powershell
-robocopy \\wsl$\archlinux\home\<user>\gpu-triage C:\dev\gpu-triage /MIR /XD .git
+robocopy \\wsl$\archlinux\home\<user>\gpu-triage C:\dev\gpu-triage /MIR /XD .git .dlcache dist
 ```
 
 ### Variante A — Schneller Iterationstest mit Hyper-V und VHDX

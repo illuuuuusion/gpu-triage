@@ -84,9 +84,18 @@ else
 fi
 
 log "Installing required runtime packages from USB only..."
-# All dependencies are present in the bundle. --needed avoids rewriting packages
-# that already exist at the identical version in the live ISO.
-pacman -U --needed --noconfirm "${PACKAGE_FILES[@]}"
+# --needed avoids rewriting packages that already exist at the identical version
+# in the live ISO.
+if ! pacman -U --needed --noconfirm "${PACKAGE_FILES[@]}"; then
+  if [[ "${ISO_SUBTRACT:-0}" == "1" ]]; then
+    die "Installation failed.
+This bundle ships only what the Arch ISO of ${ARCHISO_DATE:-its build date} does not
+already provide, so it can only be installed from that live environment. Missing
+dependencies mean this is not that ISO. Boot the matching ISO, or rebuild with
+build_bundle.sh --no-iso-subtract for a self-contained bundle."
+  fi
+  die "Installation of the offline packages failed."
+fi
 
 log "Refreshing module dependency metadata..."
 depmod -a "$RUNNING_KERNEL" || true
