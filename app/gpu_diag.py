@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-"""gpu-triage MVP
+"""gpu-triage command line.
 
 Offline-first consumer GPU diagnostic orchestrator for Linux live systems.
 
-MVP scope:
-- enumerate AMD/NVIDIA display-class PCI devices
-- inspect PCIe link/BAR/driver state
-- snapshot PCIe AER counters for endpoint and upstream bridges
-- collect AMD hwmon or NVIDIA nvidia-smi telemetry
-- collect kernel error evidence
-- run a bounded memtest_vulkan VRAM test against the selected BDF
-- write machine-readable JSON and a concise text report
+The reachable ``triage`` and deprecated ``quick`` commands both use the
+read-only Stage-0/1 implementation in safe_triage.py.  Legacy driver-bound and
+memtest parsing helpers remain temporarily for regression coverage, but no CLI
+route invokes them in Phase 1.
 
 No /dev/mem, no register writes, no clock/power/fan changes.
 """
@@ -31,6 +27,8 @@ import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Iterable
+
+from safe_triage import SafeTriageError, run_doctor, run_pre_driver_triage
 
 SYS_PCI = Path("/sys/bus/pci/devices")
 PCI_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$")
@@ -949,28 +947,54 @@ def run_quick(args: argparse.Namespace, interactive: bool = False) -> int:
 
 
 def interactive_main(parser: argparse.ArgumentParser) -> int:
-    print("gpu-triage MVP - offline consumer GPU diagnostics")
-    print("This test stresses the selected GPU through normal drivers. It does NOT use /dev/mem.")
-    print()
-    if list_gpus() != 0:
-        return 2
-    print()
-    print("Quick MVP performs PCI/AER + telemetry + bounded Vulkan VRAM test.")
-    if input("Run QUICK diagnostic? [y/N] ").strip().lower() not in ("y", "yes", "j", "ja"):
-        return 0
-    # Defaults come from the parser itself, so they cannot drift from the CLI.
-    return run_quick(parser.parse_args(["quick"]), interactive=True)
+    parser.print_help()
+    print("\nA triage target is never selected interactively. Use --gpu 0000:BB:DD.F.")
+    return 2
+
+
+def run_safe_cli(args: argparse.Namespace) -> int:
+    if getattr(args, "rom", False):
+        raise DiagError("--rom belongs to Phase 2 and is not enabled by this safe pre-driver implementation")
+    try:
+        report, json_path, markdown_path = run_pre_driver_triage(
+            gpu_arg=args.gpu,
+            report_dir_arg=args.report_dir,
+            repo_root=REPO_ROOT,
+        )
+    except SafeTriageError as exc:
+        raise DiagError(str(exc)) from exc
+    print(f"Target:  {report.target['bdf']}")
+    print(f"Stage:   {report.stage.value}")
+    print(f"Overall: {report.overall.value}")
+    print(f"JSON:    {json_path}")
+    print(f"REPORT:  {markdown_path}")
+    return 0 if report.overall.value == "PASS" else 1
+
+
+def run_doctor_cli(args: argparse.Namespace) -> int:
+    ok, findings = run_doctor(report_dir_arg=args.report_dir, repo_root=REPO_ROOT)
+    for item in findings:
+        print(f"[{item['status']}] {item['check']}: {item['detail']}")
+    return 0 if ok else 2
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="gpu-triage", description="Offline-first AMD/NVIDIA GPU diagnostic MVP")
+    p = argparse.ArgumentParser(prog="gpu-triage", description="Safe offline AMD/NVIDIA GPU triage")
     sub = p.add_subparsers(dest="command")
     sub.add_parser("list", help="list display-class PCI GPUs")
-    q = sub.add_parser("quick", help="run MVP diagnostic")
-    q.add_argument("--gpu", help="target PCI BDF, e.g. 0000:03:00.0 or 03:00.0")
-    q.add_argument("--vram-seconds", type=int, default=60, help="bounded memtest_vulkan duration (default: 60)")
-    q.add_argument("--no-vram", action="store_true", help="probe only; do not stress VRAM")
-    q.add_argument("--report-dir", help="explicit writable report directory")
+    doctor = sub.add_parser("doctor", help="verify report target, pinned bundle, kernel and safe runtime")
+    doctor.add_argument("--report-dir", help="explicit atomically writable report directory")
+    for command, help_text in (
+        ("triage", "run read-only Stage 0/1 triage"),
+        ("quick", "deprecated alias for safe triage"),
+    ):
+        q = sub.add_parser(command, help=help_text)
+        q.add_argument("--gpu", required=True, help="exact target PCI BDF, e.g. 0000:03:00.0")
+        q.add_argument("--preflight-only", action="store_true", help="stop after read-only Stage 1 (currently always true)")
+        q.add_argument("--rom", action="store_true", help="reserved explicit ROM opt-in (not enabled in Phase 1)")
+        q.add_argument("--vram-seconds", type=int, default=60, help="reserved for a future exact-mapped VRAM stage")
+        q.add_argument("--no-vram", action="store_true", help="compatibility flag; Stage 1 never runs VRAM")
+        q.add_argument("--report-dir", help="explicit atomically writable report directory")
     return p
 
 
@@ -982,10 +1006,14 @@ def main() -> int:
             return interactive_main(parser)
         if args.command == "list":
             return list_gpus()
-        if args.command == "quick":
+        if args.command == "doctor":
+            return run_doctor_cli(args)
+        if args.command in ("quick", "triage"):
             if args.vram_seconds < 5 or args.vram_seconds > 3600:
                 raise DiagError("--vram-seconds must be between 5 and 3600")
-            return run_quick(args)
+            if args.command == "quick":
+                print("WARNING: 'quick' is deprecated; running read-only 'triage'.", file=sys.stderr)
+            return run_safe_cli(args)
         parser.error("unknown command")
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)

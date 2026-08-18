@@ -8,6 +8,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOTSTRAP="$REPO_ROOT/scripts/bootstrap.sh"
+SAFE_PACKAGES="$REPO_ROOT/offline/package-list-safe.txt"
 
 FAILED=0
 check() {
@@ -78,6 +79,35 @@ grep -q '^STAMP_DIR="/run/gpu-triage"' "$BOOTSTRAP" \
 grep -q 'GPU_TRIAGE_FORCE_BOOTSTRAP' "$BOOTSTRAP" \
   && echo "ok   force-bootstrap escape hatch present" \
   || { echo "FAIL force-bootstrap escape hatch present"; FAILED=1; }
+
+if grep -Eq '^[[:space:]]*(modprobe|rmmod)([[:space:]]|$)|/sys/bus/pci/(drivers/.*/(bind|unbind)|rescan)|/reset([[:space:]]|$)' "$BOOTSTRAP"; then
+  echo "FAIL bootstrap contains a reachable GPU driver/device action"
+  FAILED=1
+else
+  echo "ok   bootstrap contains no module/bind/reset action"
+fi
+
+grep -q 'refusing an unverified offline installation' "$BOOTSTRAP" \
+  && echo "ok   missing SHA256SUMS fails closed" \
+  || { echo "FAIL missing SHA256SUMS does not fail closed"; FAILED=1; }
+
+if grep -Eq '^[[:space:]]*(source|\.)[[:space:]]+.*MANIFEST' "$BOOTSTRAP"; then
+  echo "FAIL bootstrap executes manifest.env as shell code"
+  FAILED=1
+else
+  echo "ok   manifest.env is parsed as data, not sourced"
+fi
+
+if grep -Evi '^\s*(#|$|python$|pciutils$)' "$SAFE_PACKAGES" | grep -q .; then
+  echo "FAIL safe-runtime direct package role contains unexpected packages"
+  FAILED=1
+else
+  echo "ok   safe-runtime direct role is limited to python and pciutils"
+fi
+
+grep -q 'bootstrap.sh" --profile safe-runtime' "$REPO_ROOT/start.sh" \
+  && echo "ok   start.sh requests only safe-runtime for Stage 0/1" \
+  || { echo "FAIL start.sh does not select safe-runtime"; FAILED=1; }
 
 if [[ $FAILED -eq 0 ]]; then
   echo "bootstrap stamp tests: PASS"

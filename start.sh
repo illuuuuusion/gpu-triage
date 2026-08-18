@@ -14,7 +14,7 @@ PYTHON="$(command -v python3 || command -v python || true)"
 # bootstrap path, which installs one.
 NEEDS_RUNTIME=1
 case "${1:-}" in
-  list | help | --help | -h) NEEDS_RUNTIME=0 ;;
+  list | doctor | help | --help | -h) NEEDS_RUNTIME=0 ;;
 esac
 for arg in "$@"; do
   case "$arg" in
@@ -22,11 +22,26 @@ for arg in "$@"; do
   esac
 done
 
+# The pinned Arch ISO normally already provides the complete safe profile.
+# Reuse it as-is; only a missing Python/lspci tool justifies an offline install.
+case "${1:-}" in
+  triage | quick)
+    if [[ -n "$PYTHON" ]] && command -v lspci >/dev/null 2>&1; then
+      NEEDS_RUNTIME=0
+    fi
+    ;;
+esac
+
 if [[ $NEEDS_RUNTIME -eq 0 && -n "$PYTHON" ]]; then
   if [[ "${1:-}" == "help" ]]; then
     set -- --help
   fi
   exec "$PYTHON" "$APP" "$@"
+fi
+
+if [[ "${1:-}" == "doctor" && -z "$PYTHON" ]]; then
+  echo "No Python interpreter; doctor does not install or change the live system." >&2
+  exit 2
 fi
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -36,7 +51,9 @@ fi
 
 mkdir -p "$REPORT_DIR"
 
-bash "$REPO_ROOT/scripts/bootstrap.sh"
+# Stage 0/1 needs only the safe userspace profile.  This installer verifies and
+# installs files; it never loads, removes, binds, or unbinds a GPU driver.
+bash "$REPO_ROOT/scripts/bootstrap.sh" --profile safe-runtime
 
 # bootstrap.sh may have installed the interpreter that was missing above.
 PYTHON="$(command -v python3 || command -v python || true)"

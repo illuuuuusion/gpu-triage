@@ -1,0 +1,36 @@
+#!/usr/bin/ash
+
+run_earlyhook() {
+    local token target device marker
+    target=""
+    marker=/run/gpu-triage-guard
+    mkdir -p "$marker"
+
+    for token in $(cat /proc/cmdline); do
+        case "$token" in
+            gpu_triage.target=*) target="${token#gpu_triage.target=}" ;;
+        esac
+    done
+
+    case "$target" in
+        [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F].[0-7]) ;;
+        *) printf '%s\n' "invalid or missing gpu_triage.target" > "$marker/error"; return 1 ;;
+    esac
+
+    target=$(printf '%s' "$target" | tr 'A-F' 'a-f')
+    device="/sys/bus/pci/devices/$target"
+    if [ ! -e "$device/driver_override" ]; then
+        printf '%s\n' "driver_override unavailable for $target during early hook" > "$marker/error"
+        return 1
+    fi
+    if [ -L "$device/driver" ]; then
+        printf '%s\n' "$target already has a driver before early hook" > "$marker/error"
+        return 1
+    fi
+    if ! printf '%s' 'gpu-triage-quarantine' > "$device/driver_override"; then
+        printf '%s\n' "could not quarantine $target" > "$marker/error"
+        return 1
+    fi
+    printf '%s\n' "$target" > "$marker/target"
+    printf '%s\n' 'gpu-triage-quarantine' > "$marker/sentinel"
+}

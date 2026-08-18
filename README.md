@@ -5,18 +5,23 @@
 1. Repository auf einem Windows-PC auschecken und einen Ventoy-Stick einstecken.
 2. In PowerShell im Repository `.\tools\prepare-usb.ps1` ausführen.
 3. Vom Stick booten und das bereitgestellte Arch-ISO im Ventoy-Menü wählen.
-4. In der Root-Shell die eine Zeile aus `BOOT.txt` eingeben.
+4. **Vor dem Boot** das passende Treibermodul nach [docs/SAFE-BOOT.md](docs/SAFE-BOOT.md)
+   auf die Kernelzeile setzen.
+5. In der Root-Shell die Mapper-first-Zeile aus `BOOT.txt` eingeben.
 
-Offline-Diagnosewerkzeug für dedizierte Grafikkarten. gpu-triage sammelt auf einem
-separaten Diagnose-PC belastbare Belege zum Zustand einer GPU — PCI-Sichtbarkeit,
-Treiberbindung, PCIe-Link, Fehlerzähler, Telemetrie und ein begrenzter VRAM-Test —
-und schreibt daraus einen Text- und JSON-Report.
+Offline-Diagnosewerkzeug für dedizierte Grafikkarten. Der aktuelle sichere Pfad
+sammelt vor jeder Treiberinteraktion PCI-Identität, Topologie, Link, BARs,
+Endpoint-/Upstream-AER, Kernel-, DMI-, Treiber-Intent- und pstore-Evidenz. Er
+lädt, entfernt, bindet oder entbindet keinen GPU-Treiber und führt weder Vulkan-
+noch VRAM-Last aus.
 
 Der Diagnose-PC benötigt dabei **kein Internet**: Live-System, Anwendung, Pakete
 und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 
-- **Status:** v0.1 (MVP), siehe [ROADMAP.md](ROADMAP.md)
-- **Unterstützte Hardware:** AMD Radeon RX 5000–9000, NVIDIA GeForce RTX 3000–5000
+- **Status:** Safe-Triage Phase 1, siehe [ROADMAP.md](ROADMAP.md)
+- **Erkannt:** AMD-/NVIDIA-PCI-Geräte der Display-/3D-Klasse
+- **Hardwarevalidiert:** noch keine allgemeine Serienfreigabe; Validierungsstand
+  und Same-Vendor-Grenze stehen in [docs/SAFE-BOOT.md](docs/SAFE-BOOT.md)
 - **Plattform:** Arch Linux Live-System (offizielles ISO), Python 3 aus der Standardbibliothek
 
 ## Inhalt
@@ -36,18 +41,17 @@ und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 
 ## Funktionsumfang
 
-v0.1 erhebt pro Zielkarte:
+Phase 1 erhebt pro Zielkarte:
 
 | Bereich | Belege |
 | --- | --- |
 | Identität | PCI-Präsenz, Vendor/Device- und Subsystem-IDs, BDF, AMD/NVIDIA-Erkennung |
-| Treiber | gebundener Kernel-Treiber, DRM-Nodes |
+| Safety | cmdline, Blacklist-/BDF-Quarantäne-Intent, beobachteter Treiber, Display-Risk |
 | Anbindung | PCIe Link Speed / Width, BAR-Ressourcen |
-| Fehler | PCIe-AER vor und nach Last, inklusive Upstream-Ports |
-| Telemetrie | AMD hwmon, NVIDIA `nvidia-smi` |
-| Kernel | Fehlersignale wie NVIDIA Xid oder amdgpu reset/timeout/fault |
-| VRAM | begrenzter Vulkan-Test über `memtest_vulkan` |
-| Ausgabe | Text- und JSON-Report auf dem USB-Stick |
+| Fehler | Endpoint-/Upstream-AER-Snapshot ohne erfundenes Last-Delta |
+| Kernel | vollständiger Sidecar plus relevante GPU/AER/Lockup-Zeilen |
+| Persistenz | pstore-Verfügbarkeit und unveränderte Kopie vorhandener Records |
+| Ausgabe | kompakter Markdown- und JSON-Report plus begrenzte Raw-Sidecars |
 
 
 ## Voraussetzungen
@@ -111,13 +115,13 @@ Vom Ventoy-Stick booten, das offizielle Arch-ISO wählen und in der Root-Shell
 diese **eine Zeile** tippen — sie steht wortgleich in `BOOT.txt` im Stick-Root:
 
 ```bash
-m=/mnt/v; mkdir -p $m; mount /dev/disk/by-label/Ventoy $m; bash $m/gpu-triage/go.sh list
+d=$(readlink -f /dev/disk/by-label/Ventoy); m=/mnt/v; mkdir -p $m; mount /dev/mapper/${d##*/} $m || mount "$d" $m; bash $m/gpu-triage/go.sh list
 ```
 
 Danach genügt für jeden weiteren Aufruf:
 
 ```bash
-bash $m/gpu-triage/go.sh quick --gpu 0000:03:00.0
+bash $m/gpu-triage/go.sh triage --gpu 0000:03:00.0 --preflight-only
 ```
 
 `go.sh` ist ein Wrapper vor `start.sh`, kein zweiter Pfad: Er sucht die
@@ -143,16 +147,16 @@ bash /mnt/ventoy/gpu-triage/start.sh list
 
 ```bash
 start.sh list                                        # verfügbare GPUs auflisten
-start.sh quick --gpu 0000:03:00.0                    # Diagnose mit VRAM-Test (60 s)
-start.sh quick --gpu 03:00.0 --vram-seconds 120      # längerer VRAM-Test
-start.sh quick --gpu 03:00.0 --no-vram               # nur Probe, keine VRAM-Last
-start.sh quick --gpu 03:00.0 --report-dir /mnt/...   # abweichendes Reportverzeichnis
+start.sh doctor --report-dir /mnt/v/gpu-triage/reports # Runtime/Bundle/Reportziel prüfen
+start.sh triage --gpu 0000:03:00.0 --preflight-only  # sichere Stage-0/1-Triage
+start.sh triage --gpu 0000:03:00.0 --report-dir /mnt/... # anderes Reportziel
+start.sh quick --gpu 0000:03:00.0                    # deprecated, identischer Safe-Pfad
 start.sh --help
 ```
 
-`--gpu` akzeptiert ausschließlich vollständige PCI-Adressen (`0000:03:00.0`) oder
-die Kurzform (`03:00.0`, wird auf Domain `0000` normalisiert). Teilangaben wie `1`
-werden abgelehnt, damit nie versehentlich die falsche Karte getestet wird.
+`triage` verlangt immer eine vollständige PCI-Adresse einschließlich Domain und
+Function (`0000:03:00.0`). Es gibt keine automatische oder interaktive Auswahl.
+`--rom` ist in Phase 1 fail-closed reserviert und aktiviert noch keinen ROM-Zugriff.
 
 ### Bootstrap
 
@@ -161,7 +165,14 @@ wenn er gebraucht wird:
 
 - `list` und `--help` benötigen nur die Python-Standardbibliothek und starten
   sofort, ohne Bundle-Prüfung oder Paketinstallation.
-- Für Diagnoseläufe läuft der Bootstrap **einmal pro Live-Boot**. Danach liegt unter
+- Fehlen Python oder `lspci`, installiert der Bootstrap ausschließlich das
+  hash-verifizierte Profil `safe-runtime`. Es enthält keine GPU-Treiber- oder
+  Vulkanrolle. Sind beide Werkzeuge bereits im ISO vorhanden, wird nichts installiert.
+- Das noch gepinnte 2026.08.01-Bundle stammt vor der Rollentrennung; dort sind
+  Python und `pciutils` nachweislich in `excluded.txt` als ISO-provided erfasst.
+  Fehlt eines der Werkzeuge dennoch, wird fail-closed ein neu gebautes
+  Phase-1-Bundle mit Profilmetadaten verlangt.
+- Der Bootstrap läuft höchstens **einmal pro Profil und Live-Boot**. Danach liegt unter
   `/run/gpu-triage/bootstrap.ok` eine Marke, die an Kernel, Mountpfad, `manifest.env`
   und `SHA256SUMS` gebunden ist; weitere Läufe überspringen Prüfsummen und
   Installation. `/run` ist tmpfs — auf dem Stick bleibt nichts zurück.
@@ -171,32 +182,30 @@ wenn er gebraucht wird:
 ## Reports und Bewertung
 
 Reports landen standardmäßig in `reports/` — also auf demselben USB-Stick — als
-Text- und JSON-Datei.
+Markdown- und JSON-Datei, ergänzt um `-kernel.log`, `-lspci.txt` und bei Bedarf
+ein `-pstore/`-Verzeichnis.
 
-`PASS` wird nur vergeben, wenn alle wesentlichen Tests tatsächlich gelaufen sind.
-Ein mit `--no-vram` übersprungener oder mangels `memtest_vulkan` nicht ausführbarer
-VRAM-Test ergibt `WARN`, nie `PASS`. Auch ein `PASS` bedeutet lediglich: Die aktuell
-implementierten Tests haben keinen Fehler gefunden — es ist keine Garantie für eine
-vollständig gesunde GPU.
+Stage 1 endet absichtlich `INCOMPLETE`: Treiberinitialisierung, Telemetrie,
+Vulkan, VRAM und Compute werden nicht gestartet. Ein ungebundenes Target ohne
+belegte Blacklist/Quarantäne ergibt dagegen einen klaren Driver-Init-`FAIL`.
 
-Die Diagnose folgt einer festen Kette, in der ein defekter Zustand ein Ergebnis ist
-und kein Programmfehler:
+Die sichere Triage folgt einer festen Kette, in der ein blockierter Zustand ein
+sichtbares Ergebnis ist und keine automatische Reparatur auslöst:
 
 ```text
-PCI sichtbar? → Treiber gebunden? → Vulkan verfügbar? → VRAM-Test ausführbar?
-             → AER / Kernel / Datenfehler unter Last?
+Reportziel atomar beschreibbar? → BDF exakt? → Display-Risiko ausgeschlossen?
+→ Treiber-Intent beobachtet? → PCI/AER/Kernel/pstore read-only erfassen
 ```
 
-Ein Ergebnis wird immer nur der tatsächlich getesteten Karte zugeschrieben. Listet
-`memtest_vulkan` die Zieladresse nicht auf, bricht der VRAM-Test ab, statt die
-automatisch vorausgewählte Nachbarkarte zu belasten und deren Ergebnis zu melden.
+Driver-bound- und Vulkan-Zuordnung folgen erst in Phase 3. Der Phase-1-Pfad
+öffnet deshalb kein Vulkan-Gerät und kann kein VRAM-`PASS` erzeugen.
 
 ### Exit-Codes
 
 | Code | Bedeutung |
 | --- | --- |
-| `0` | Diagnose gelaufen, Gesamtergebnis `PASS` |
-| `1` | Diagnose gelaufen, Gesamtergebnis `WARN` oder `FAIL` — der Report zählt die Befunde auf |
+| `0` | vollständiger künftiger Modus mit Gesamtergebnis `PASS` |
+| `1` | Triage gelaufen, Gesamtergebnis `INCOMPLETE` oder `FAIL`; Report vorhanden |
 | `2` | Lauf nicht möglich: keine GPU gefunden, ungültige Adresse, Reportverzeichnis nicht beschreibbar |
 | `3` | Bootstrap abgebrochen: Offline-Bundle passt nicht zum laufenden Kernel |
 | `130` | Abbruch durch Strg+C |
@@ -209,7 +218,6 @@ Skripte ist das der wichtige Unterschied.
 | Variable | Wirkung |
 | --- | --- |
 | `GPU_TRIAGE_FORCE_BOOTSTRAP` | `1` erzwingt einen vollständigen Bootstrap trotz gültiger Marke |
-| `GPU_TRIAGE_MEMTEST` | Pfad zu einer abweichenden `memtest_vulkan`-Binary (sonst über `PATH`) |
 | `GPU_TRIAGE_REPORT_DIR` | Zielverzeichnis für Reports (entspricht `--report-dir`) |
 
 ## Projektstruktur
@@ -219,9 +227,13 @@ gpu-triage/
 ├── go.sh                       # Wrapper: Stick finden/mounten, dann start.sh
 ├── start.sh                    # Einstiegspunkt: Routing, Rechte, Bootstrap-Aufruf
 ├── app/
-│   └── gpu_diag.py             # Diagnose-Orchestrator
+│   ├── gpu_diag.py             # CLI und Legacy-Helfer
+│   ├── safe_triage.py          # Stage-0/1-Orchestrator
+│   ├── collectors.py           # ausschließlich read-only Collector
+│   ├── triage_model.py         # Status-, Stage- und Resultmodell
+│   └── reporting.py            # Markdown/JSON und Sidecars
 ├── scripts/
-│   └── bootstrap.sh            # Offline-Runtime installieren, Treiber laden
+│   └── bootstrap.sh            # Offline-Runtime installieren, keine Treiberaktion
 ├── offline/
 │   ├── build_bundle.sh         # baut das Offline-Paketbundle (Internet-PC)
 │   ├── bundle_helpers.sh       # testbare Subtraktions-/Dateinamenlogik
@@ -238,6 +250,8 @@ gpu-triage/
 │   ├── prepare-usb.ps1         # Windows: der eine Vorbereitungsbefehl
 │   ├── ventoy-release.json     # gepinnte Ventoy-Version samt SHA256
 │   └── sync-to-usb.ps1         # Windows: Repo und ISO auf den Ventoy-Stick
+├── docs/SAFE-BOOT.md            # verbindliche Bootprofile und Grenzen
+├── liveiso/                     # nicht freigegebener Initramfs-Guard-Prototyp
 ├── .github/workflows/
 │   └── bundle.yml              # baut das Bundle, veröffentlicht es, pinnt es
 ├── tests/                      # Regressionstests, keine GPU erforderlich

@@ -1,5 +1,13 @@
 # gpu-triage in einer VM unter Windows testen
 
+> Hinweis für Phase 1: Die Abschnitte zu `run_quick`, Vulkan und
+> `memtest_vulkan` dokumentieren den historischen MVP und sind keine Anleitung
+> für den erreichbaren Safe-Triage-Pfad. Aktuell gelten `doctor` und
+> `triage --gpu 0000:BB:DD.F --preflight-only`; `quick` ist nur noch ein
+> deprecated Alias desselben read-only Pfads. Für die vollständige
+> hardwarefreie Phase-1-Gegenprobe `python3 -m unittest discover -s tests`
+> ausführen. Safe-Boot-Grenzen stehen in `docs/SAFE-BOOT.md`.
+
 Diese Anleitung beschreibt, wie sich gpu-triage von einem Windows-PC aus in einer
 virtuellen Maschine testen lässt — ohne Diagnose-Hardware und ohne echte dGPU.
 

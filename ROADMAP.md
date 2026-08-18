@@ -1,5 +1,32 @@
 # gpu-triage Roadmap
 
+## Phase 0 — Safety-Fix (implementiert)
+
+- Bootstrap ohne `modprobe`, bind/unbind, remove, rescan oder reset
+- `quick` als deprecated Alias des read-only `triage`-Pfads
+- Mapper-first `BOOT.txt`
+- Safe-Boot-Anleitung mit expliziter Same-Vendor-Grenze
+
+## Phase 1 — sichere Pre-Driver-Triage (implementiert, Hardwarevalidierung offen)
+
+- explizite vollständige BDF und Display-Risk-Gates
+- Stage 0/1 mit Treiber-Intent und beobachtetem Bindungszustand
+- PCI-Identität, Topologie, BAR/Link, Endpoint-/Upstream-AER
+- DMI, cmdline, Module, vollständiger Kernel-Sidecar und pstore-Kopien
+- Safe-Runtime-Rolle ohne GPU-Treiberaktivierung
+- BDF-spezifischer Initramfs-Guard als **nicht freigegebener Prototyp**
+- Same-Vendor bleibt `BLOCKED: SAFE_BOOT_NOT_PROVEN`
+
+Die AMD-/NVIDIA-Known-good-Gegenproben auf echter Hardware sind noch nicht
+dokumentiert. Daher ist dies eine Implementierungs-, keine Hardwarefreigabe.
+
+## Phase 2+ — siehe PLAN-SAFE-TRIAGE.md
+
+Crash-tolerante Stage-Checkpoints, ROM-Opt-in, driver-bound Collectors, exakte
+Vulkan-BDF-Zuordnung und der eigene VRAM-/Compute-Helper folgen in den dort
+definierten Phasen. Die älteren Versionsziele unten bleiben historische
+Produktideen, sind aber nicht der aktuelle Sicherheitsplan.
+
 ## v0.1 — Repo-first Offline MVP
 
 - ein physischer USB-Stick
