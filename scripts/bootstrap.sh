@@ -51,8 +51,18 @@ fi
 [[ -f /etc/arch-release ]] || die "This MVP expects the official Arch Linux live environment."
 [[ -d "$PKG_DIR" ]] || die "Offline package directory missing: $PKG_DIR"
 [[ -f "$SUMS" ]] || die "SHA256SUMS missing; refusing an unverified offline installation."
-[[ -f "$PROFILE_SUMS" ]] || die "PROFILE-SHA256SUMS missing; runtime role selection is not authenticated."
-[[ -f "$PROFILE_FILE" ]] || die "Runtime profile missing: $PROFILE_FILE. Rebuild the Phase-1 bundle."
+LEGACY_ALL_HASHED=0
+if [[ ! -f "$PROFILE_SUMS" || ! -f "$PROFILE_FILE" ]]; then
+  if [[ "$PROFILE" == "driver-bound-runtime" && ! -e "$PROFILE_SUMS" && ! -e "$REPO_ROOT/offline/profiles" ]]; then
+    # The pinned 2026.08.01 release predates role metadata. Its hash-covered
+    # package set is exactly the old union runtime. That union is acceptable
+    # only for an already-bound Stage-3 run; safe-runtime must still fail closed
+    # rather than install GPU/Vulkan packages.
+    LEGACY_ALL_HASHED=1
+  else
+    die "Runtime profile metadata is missing or incomplete. Rebuild the bundle; safe-runtime never falls back to the union package set."
+  fi
+fi
 mapfile -t DISCOVERED_FILES < <(find "$PKG_DIR" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print | sort)
 [[ ${#DISCOVERED_FILES[@]} -gt 0 ]] || die "Offline bundle is empty. Build it on the Internet-connected PC first."
 
@@ -97,7 +107,11 @@ fi
 
 log "Verifying offline bundle and runtime-profile hashes..."
 (cd "$REPO_ROOT/offline" && sha256sum -c SHA256SUMS --quiet) || die "Offline package checksum verification failed."
-(cd "$REPO_ROOT/offline" && sha256sum -c PROFILE-SHA256SUMS --quiet) || die "Runtime profile checksum verification failed."
+if [[ $LEGACY_ALL_HASHED -eq 0 ]]; then
+  (cd "$REPO_ROOT/offline" && sha256sum -c PROFILE-SHA256SUMS --quiet) || die "Runtime profile checksum verification failed."
+else
+  log "Legacy driver-bound bundle: using the complete SHA256-covered union runtime."
+fi
 
 declare -A HASHED=()
 while read -r _ relative; do
@@ -107,14 +121,21 @@ while read -r _ relative; do
 done < "$SUMS"
 
 PACKAGE_FILES=()
-while IFS= read -r relative; do
-  [[ -n "$relative" && "$relative" != \#* ]] || continue
-  [[ "$relative" == packages/*.pkg.tar.zst && "$relative" != *..* ]] \
-    || die "Invalid path in $PROFILE_FILE: $relative"
-  [[ -n "${HASHED[$relative]:-}" ]] || die "Profile package is not covered by SHA256SUMS: $relative"
-  [[ -f "$REPO_ROOT/offline/$relative" ]] || die "Profile package is missing: $relative"
-  PACKAGE_FILES+=("$REPO_ROOT/offline/$relative")
-done < "$PROFILE_FILE"
+if [[ $LEGACY_ALL_HASHED -eq 1 ]]; then
+  for relative in "${!HASHED[@]}"; do
+    [[ -f "$REPO_ROOT/offline/$relative" ]] || die "Hashed package is missing: $relative"
+    PACKAGE_FILES+=("$REPO_ROOT/offline/$relative")
+  done
+else
+  while IFS= read -r relative; do
+    [[ -n "$relative" && "$relative" != \#* ]] || continue
+    [[ "$relative" == packages/*.pkg.tar.zst && "$relative" != *..* ]] \
+      || die "Invalid path in $PROFILE_FILE: $relative"
+    [[ -n "${HASHED[$relative]:-}" ]] || die "Profile package is not covered by SHA256SUMS: $relative"
+    [[ -f "$REPO_ROOT/offline/$relative" ]] || die "Profile package is missing: $relative"
+    PACKAGE_FILES+=("$REPO_ROOT/offline/$relative")
+  done < "$PROFILE_FILE"
+fi
 
 if [[ ${#PACKAGE_FILES[@]} -eq 0 ]]; then
   log "Profile $PROFILE is already fully provided by the pinned Arch ISO; no package install is needed."

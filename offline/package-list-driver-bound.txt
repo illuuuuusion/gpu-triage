@@ -1,4 +1,4 @@
-# Future driver-bound stages; not selected by safe triage.
+# Stage 3 for targets already bound to the vendor-expected driver.
 python
 pciutils
 vulkan-tools

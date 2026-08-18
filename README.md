@@ -9,16 +9,17 @@
    auf die Kernelzeile setzen.
 5. In der Root-Shell die Mapper-first-Zeile aus `BOOT.txt` eingeben.
 
-Offline-Diagnosewerkzeug für dedizierte Grafikkarten. Der aktuelle sichere Pfad
-sammelt vor jeder Treiberinteraktion PCI-Identität, Topologie, Link, BARs,
-Endpoint-/Upstream-AER, Kernel-, DMI-, Treiber-Intent- und pstore-Evidenz. Er
-lädt, entfernt, bindet oder entbindet keinen GPU-Treiber und führt weder Vulkan-
-noch VRAM-Last aus.
+Offline-Diagnosewerkzeug für dedizierte Grafikkarten. Der sichere Pfad sammelt
+zuerst PCI-Identität, Topologie, Link, BARs, Endpoint-/Upstream-AER, Kernel-,
+DMI-, Treiber-Intent- und pstore-Evidenz. Nur wenn der erwartete Treiber bereits
+gebunden ist, folgen BDF-spezifische Telemetrie, Vulkan-Identität und optional
+ein streng gegateter Legacy-VRAM-Screen. Das Werkzeug lädt, entfernt, bindet
+oder entbindet keinen GPU-Treiber.
 
 Der Diagnose-PC benötigt dabei **kein Internet**: Live-System, Anwendung, Pakete
 und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 
-- **Status:** Safe-Triage Phase 2, siehe [ROADMAP.md](ROADMAP.md)
+- **Status:** Safe-Triage Phase 3, siehe [ROADMAP.md](ROADMAP.md)
 - **Erkannt:** AMD-/NVIDIA-PCI-Geräte der Display-/3D-Klasse
 - **Hardwarevalidiert:** noch keine allgemeine Serienfreigabe; Validierungsstand
   und Same-Vendor-Grenze stehen in [docs/SAFE-BOOT.md](docs/SAFE-BOOT.md)
@@ -52,6 +53,10 @@ Der aktuelle Stage-0/1-Lauf erhebt pro Zielkarte:
 | Kernel | vollständiger Sidecar plus relevante GPU/AER/Lockup-Zeilen |
 | Persistenz | pstore-Verfügbarkeit und unveränderte Kopie vorhandener Records |
 | Ausgabe | kompakter Markdown- und JSON-Report, atomare Stage-Checkpoints plus begrenzte Raw-Sidecars |
+| Bereits gebundener AMD-Treiber | BDF-lokales hwmon und vorhandene `ras/*_err_count` ausschließlich read-only |
+| Bereits gebundener NVIDIA-Treiber | `nvidia-smi -i <BDF>` mit Rückprüfung der ausgegebenen vollständigen BDF |
+| Vulkan | exakte Domain/Bus/Device/Function- und PCI-ID-Zuordnung, alternativ eindeutiger DRM-Major/Minor-Pfad |
+| Lastfenster | AER- und Kernel-Deltas; neue NVIDIA-Xid-/AMD-Fehlersignale bleiben BDF-bezogen sichtbar |
 
 
 ## Voraussetzungen
@@ -148,7 +153,9 @@ bash /mnt/ventoy/gpu-triage/start.sh list
 ```bash
 start.sh list                                        # verfügbare GPUs auflisten
 start.sh doctor --report-dir /mnt/v/gpu-triage/reports # Runtime/Bundle/Reportziel prüfen
-start.sh triage --gpu 0000:03:00.0 --preflight-only  # sichere Stage-0/1-Triage
+start.sh triage --gpu 0000:03:00.0 --preflight-only  # garantiert nur Stage 0/1
+start.sh triage --gpu 0000:03:00.0 --no-vram         # gebundene Treiberevidenz ohne Speicherlast
+start.sh triage --gpu 0000:03:00.0 --vram-seconds 60 # adaptiv; Legacy-Screen nur nach exaktem Gate
 start.sh triage --gpu 0000:03:00.0 --report-dir /mnt/... # anderes Reportziel
 start.sh quick --gpu 0000:03:00.0                    # deprecated, identischer Safe-Pfad
 start.sh --help
@@ -156,7 +163,17 @@ start.sh --help
 
 `triage` verlangt immer eine vollständige PCI-Adresse einschließlich Domain und
 Function (`0000:03:00.0`). Es gibt keine automatische oder interaktive Auswahl.
+Ein ungebundenes Target endet nach Stage 1. Ein bereits an den erwarteten
+Vendor-Treiber gebundenes Target geht ohne `--preflight-only` adaptiv in Stage 3.
 `--rom` ist fail-closed reserviert und aktiviert noch keinen ROM-Zugriff.
+
+Der Übergangs-Test `memtest_vulkan` kennt selbst nur Bus:Device. Er darf deshalb
+erst starten, wenn `vulkaninfo` genau ein PhysicalDevice anhand vollständiger
+PCI-BDF plus Vendor/Device-ID oder eindeutig über dessen DRM-Knoten zuordnet
+und dieselbe Vulkan-Sicht kein zweites Hardwaregerät enthält. Andernfalls lautet
+das Ergebnis `UNAVAILABLE`/`BLOCKED`; es beginnt keine Allokation. Auch ein
+erfolgreicher Legacy-Screen bleibt `INCOMPLETE`, weil Phase 4 erst Transfer,
+VRAM und Compute unabhängig isoliert.
 
 ### Bootstrap
 
@@ -168,10 +185,17 @@ wenn er gebraucht wird:
 - Fehlen Python oder `lspci`, installiert der Bootstrap ausschließlich das
   hash-verifizierte Profil `safe-runtime`. Es enthält keine GPU-Treiber- oder
   Vulkanrolle. Sind beide Werkzeuge bereits im ISO vorhanden, wird nichts installiert.
+- Nur für einen nicht als `--preflight-only` gestarteten Lauf, dessen Target
+  bereits nachweislich an `amdgpu` bzw. `nvidia` gebunden ist, wählt `start.sh`
+  das hash-verifizierte Profil `driver-bound-runtime`. Der Installer lädt und
+  bindet weiterhin kein Modul. Ungebundene Targets lösen diese Installation
+  nicht aus.
 - Das noch gepinnte 2026.08.01-Bundle stammt vor der Rollentrennung; dort sind
   Python und `pciutils` nachweislich in `excluded.txt` als ISO-provided erfasst.
   Fehlt eines der Werkzeuge dennoch, wird fail-closed ein neu gebautes
-  Phase-1-Bundle mit Profilmetadaten verlangt.
+  Bundle mit Profilmetadaten verlangt. Für ein bereits gebundenes Stage-3-
+  Target darf dieses Altbundle dagegen seine vollständige, SHA256-gedeckte
+  Union-Runtime installieren; für `safe-runtime` ist dieser Fallback verboten.
 - Der Bootstrap läuft höchstens **einmal pro Profil und Live-Boot**. Danach liegt unter
   `/run/gpu-triage/bootstrap.ok` eine Marke, die an Kernel, Mountpfad, `manifest.env`
   und `SHA256SUMS` gebunden ist; weitere Läufe überspringen Prüfsummen und
@@ -199,9 +223,11 @@ flüchtig: Diese Spiegelung schützt gegen beschädigte Reportdateien und kann
 nach einem Medienfehler noch kopiert werden, ist aber ausdrücklich keine
 Crash- oder Power-Loss-Garantie.
 
-Stage 1 endet absichtlich `INCOMPLETE`: Treiberinitialisierung, Telemetrie,
-Vulkan, VRAM und Compute werden nicht gestartet. Ein ungebundenes Target ohne
-belegte Blacklist/Quarantäne ergibt dagegen einen klaren Driver-Init-`FAIL`.
+Stage 1 endet bei ungebundenem Target oder `--preflight-only` absichtlich
+`INCOMPLETE`. Ein ungebundenes Target ohne belegte Blacklist/Quarantäne ergibt
+dagegen einen klaren Driver-Init-`FAIL`. Stage 3/4 bleibt ohne den unabhängigen
+Phase-4-Compute-/Transfer-Helper ebenfalls `INCOMPLETE`, kann aber klare
+Telemetry-, AER-, Kernel- oder Legacy-VRAM-Fehler als `FAIL` festhalten.
 
 Die sichere Triage folgt einer festen Kette, in der ein blockierter Zustand ein
 sichtbares Ergebnis ist und keine automatische Reparatur auslöst:
@@ -211,8 +237,11 @@ Reportziel atomar beschreibbar? → BDF exakt? → Display-Risiko ausgeschlossen
 → Treiber-Intent beobachtet? → PCI/AER/Kernel/pstore read-only erfassen
 ```
 
-Driver-bound- und Vulkan-Zuordnung folgen erst in Phase 3. Der aktuelle Pfad
-öffnet deshalb kein Vulkan-Gerät und kann kein VRAM-`PASS` erzeugen.
+Vor und nach Stage 3/4 werden Kernel und AER erneut aufgenommen. Der Kernel-
+Sidecar enthält beide Zeitfenster; ein gelaufener Legacy-Screen erhält einen
+eigenen begrenzten Log-Sidecar. Neue korrigierbare AER-Zähler ergeben `WARN`,
+neue nonfatal/fatal Zähler `FAIL`; Upstream-Werte werden nicht dem Endpoint
+zugeschrieben.
 
 ### Exit-Codes
 
@@ -233,6 +262,7 @@ Skripte ist das der wichtige Unterschied.
 | --- | --- |
 | `GPU_TRIAGE_FORCE_BOOTSTRAP` | `1` erzwingt einen vollständigen Bootstrap trotz gültiger Marke |
 | `GPU_TRIAGE_REPORT_DIR` | Zielverzeichnis für Reports (entspricht `--report-dir`) |
+| `GPU_TRIAGE_MEMTEST` | expliziter ausführbarer Pfad zum Legacy-Backend; ein ungültiger Override fällt geschlossen aus |
 
 ## Projektstruktur
 
@@ -242,8 +272,10 @@ gpu-triage/
 ├── start.sh                    # Einstiegspunkt: Routing, Rechte, Bootstrap-Aufruf
 ├── app/
 │   ├── gpu_diag.py             # CLI und Legacy-Helfer
-│   ├── safe_triage.py          # Stage-0/1-Orchestrator
+│   ├── safe_triage.py          # adaptive Stage-0/1/3/4-State-Machine
 │   ├── collectors.py           # ausschließlich read-only Collector
+│   ├── driver_probe.py         # gebundene Telemetrie, Vulkan-Mapping, Deltas
+│   ├── legacy_vram.py          # exakt gegateter memtest_vulkan-Adapter
 │   ├── triage_model.py         # Status-, Stage- und Resultmodell
 │   └── reporting.py            # kompakte Reports, Checkpoints, Spiegel und Sidecars
 ├── scripts/
@@ -328,8 +360,8 @@ eingebacken wird, bleiben Entwicklungs- und Boot-Zyklus unabhängig voneinander.
 Ein eigenes gpu-triage-Live-ISO ist als späteres Release-Artefakt vorgesehen.
 
 **Abbrechen statt raten.** Passt das Bundle nicht zum laufenden Kernel, bricht der
-Bootstrap ab. Ein nicht durchgeführter Test wird als `WARN` ausgewiesen und nie
-als Erfolg gewertet.
+Bootstrap ab. Ein nicht durchgeführter Test erhält einen expliziten Status wie
+`NOT_RUN`, `UNAVAILABLE` oder `BLOCKED` und wird nie als Erfolg gewertet.
 
 ## Manueller Weg
 

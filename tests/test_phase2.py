@@ -180,6 +180,27 @@ class TestBoundedSidecars(unittest.TestCase):
             reporting.MAX_PSTORE_ENTRY_BYTES,
         )
 
+    def test_driver_kernel_window_preserves_both_large_snapshots(self):
+        root = Path(tempfile.mkdtemp())
+        primary = root / "primary"
+        primary.mkdir()
+        writer = reporting.CheckpointWriter(primary, root / "mirror", "window")
+        sidecars = {"kernel": "window-kernel.log"}
+        reporting.write_driver_sidecars(
+            writer,
+            sidecars,
+            kernel_before={"output": "A" * reporting.MAX_KERNEL_SIDECAR_BYTES},
+            kernel_after={"output": "B" * reporting.MAX_KERNEL_SIDECAR_BYTES},
+        )
+        content = (primary / "window-kernel.log").read_text()
+        self.assertIn("### BEFORE DRIVER-BOUND STAGE", content)
+        self.assertIn("### AFTER DRIVER-BOUND STAGE", content)
+        self.assertIn("BBBB", content)
+        self.assertLessEqual(
+            (primary / "window-kernel.log").stat().st_size,
+            reporting.MAX_KERNEL_SIDECAR_BYTES,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

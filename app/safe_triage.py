@@ -1,4 +1,4 @@
-"""Stage-0/1 safe-triage orchestration."""
+"""Adaptive safe-triage orchestration for pre-driver and already-bound targets."""
 
 from __future__ import annotations
 
@@ -11,7 +11,20 @@ from pathlib import Path
 from typing import Any
 
 from collectors import ReadOnlyCollector, SUPPORTED_VENDORS, positive_counter_paths
-from reporting import CheckpointWriter, ReportWriteError, validate_report_directory, write_sidecars
+from driver_probe import (
+    DriverBoundCollector,
+    aer_counter_delta,
+    classify_aer_delta,
+    kernel_failure_signals,
+    new_log_lines,
+)
+from reporting import (
+    CheckpointWriter,
+    ReportWriteError,
+    validate_report_directory,
+    write_driver_sidecars,
+    write_sidecars,
+)
 from triage_model import DriverState, MatrixEntry, Overall, Stage, Status, TriageReport, derive_overall
 
 
@@ -145,13 +158,39 @@ def _aer_observations(aer: dict[str, Any]) -> list[dict[str, str]]:
     return observations
 
 
+def _confirm_bound_target(collector: ReadOnlyCollector, original: Any) -> Any:
+    """Fail closed if identity, driver binding or display ownership changed."""
+    current = collector.target(original.bdf)
+    if current is None:
+        raise SafeTriageError(f"Target {original.bdf} disappeared before driver-bound work")
+    identity = ("vendor_id", "device_id", "class_code", "revision", "subsystem_vendor_id", "subsystem_device_id")
+    if any(getattr(current, name) != getattr(original, name) for name in identity):
+        raise SafeTriageError(f"Target identity changed at {original.bdf}; refusing driver-bound work")
+    expected = collector.expected_driver(current)
+    if current.driver != expected:
+        raise SafeTriageError(
+            f"Target binding changed at {original.bdf}: expected {expected}, observed {current.driver or 'none'}"
+        )
+    display = collector.display_risk(current)
+    if display["risk"]:
+        raise SafeTriageError(
+            f"DISPLAY_RISK appeared for {original.bdf}: {'; '.join(display['reasons'])}"
+        )
+    return current
+
+
 def run_pre_driver_triage(
     *,
     gpu_arg: str | None,
     report_dir_arg: str | None,
     repo_root: Path,
     collector: ReadOnlyCollector | None = None,
+    driver_collector: DriverBoundCollector | None = None,
+    preflight_only: bool = False,
+    no_vram: bool = False,
+    vram_seconds: int = 60,
 ) -> tuple[TriageReport, Path, Path]:
+    """Run the state machine; the historical function name is API-compatible."""
     collector = collector or ReadOnlyCollector()
 
     # Report persistence is checked before touching the target device.
@@ -166,7 +205,7 @@ def run_pre_driver_triage(
     stem = f"gpu-triage-{timestamp.strftime('%Y%m%d-%H%M%S')}-{bdf.replace(':', '_')}"
     writer = CheckpointWriter(report_dir, collector.roots.run / "gpu-triage", stem)
     report = TriageReport(
-        schema=2,
+        schema=3,
         tool="gpu-triage-safe-triage",
         timestamp=timestamp.isoformat(),
         stage=Stage.S0_ENVIRONMENT,
@@ -307,9 +346,199 @@ def run_pre_driver_triage(
         ]
         report.matrix = matrix
         report.sidecars = sidecars
-        report.overall = derive_overall(matrix, full_mode=False)
-        report.stage = Stage.COMPLETE_INCOMPLETE
-        report.stage_history.append(Stage.COMPLETE_INCOMPLETE)
+
+        if state is not DriverState.BOUND_EXPECTED or preflight_only:
+            if state is DriverState.BOUND_EXPECTED and preflight_only:
+                report.matrix["driver_init"] = MatrixEntry(
+                    Status.PASS, f"expected driver {target.driver} already bound; preflight-only requested"
+                )
+                report.matrix["telemetry"] = MatrixEntry(Status.NOT_RUN, "preflight-only requested")
+                report.matrix["vulkan"] = MatrixEntry(Status.NOT_RUN, "preflight-only requested")
+            report.overall = derive_overall(matrix, full_mode=False)
+            report.stage = Stage.COMPLETE_INCOMPLETE
+            report.stage_history.append(Stage.COMPLETE_INCOMPLETE)
+            json_path, markdown_path = writer.checkpoint(report)
+            return report, json_path, markdown_path
+
+        # Stage 3 is reachable only for the already observed vendor-expected
+        # driver.  The checkpoint precedes every driver-interactive command.
+        report.stage = Stage.S3_DRIVER_BOUND
+        report.stage_history.append(Stage.S3_DRIVER_BOUND)
+        report.matrix["telemetry"] = MatrixEntry(Status.NOT_RUN, "pending Stage 3")
+        report.matrix["vulkan"] = MatrixEntry(Status.NOT_RUN, "pending exact identity mapping")
+        report.interpretation = [
+            "The vendor-expected driver was already bound before gpu-triage began.",
+            "Stage 3 may read driver-managed telemetry and enumerate Vulkan identity; it does not load or rebind a driver.",
+            "VRAM/compute and physical memory-package attribution remain unproven.",
+        ]
+        json_path, markdown_path = writer.checkpoint(report)
+
+        target = _confirm_bound_target(collector, target)
+        driver_collector = driver_collector or DriverBoundCollector(
+            roots=collector.roots, run_command=collector.run_command
+        )
+        telemetry_before = driver_collector.telemetry(target)
+        vulkan = driver_collector.vulkan_identity(target)
+        report.measurements["driver_bound"] = {
+            "telemetry_before": telemetry_before,
+            "vulkan": vulkan,
+        }
+        report.matrix["telemetry"] = MatrixEntry(
+            Status.PASS if telemetry_before.get("available") else Status.UNAVAILABLE,
+            telemetry_before.get("backend") or telemetry_before.get("reason") or "telemetry backend unavailable",
+        )
+        vulkan_status = {
+            "PASS": Status.PASS,
+            "INCONCLUSIVE": Status.INCONCLUSIVE,
+        }.get(vulkan.get("status"), Status.UNAVAILABLE)
+        report.matrix["vulkan"] = MatrixEntry(
+            vulkan_status,
+            (
+                f"exact {vulkan.get('mapping_source')} match at {target.bdf}"
+                if vulkan.get("exact_match") else vulkan.get("reason", "mapping unavailable")
+            ),
+        )
+        report.matrix["compute"] = MatrixEntry(
+            Status.NOT_RUN, "independent compute isolation requires the Phase-4 helper"
+        )
+
+        vram_log: Path | None = None
+        if no_vram:
+            vram = {"status": "NOT_RUN", "reason": "--no-vram requested"}
+            report.matrix["vram_correctness"] = MatrixEntry(Status.NOT_RUN, "--no-vram requested")
+        elif not vulkan.get("exact_match"):
+            vram = {"status": "UNAVAILABLE", "reason": "EXACT_DEVICE_MAPPING_NOT_PROVEN"}
+            report.matrix["vram_correctness"] = MatrixEntry(
+                Status.UNAVAILABLE, "EXACT_DEVICE_MAPPING_NOT_PROVEN; no allocation started"
+            )
+        elif not vulkan.get("legacy_safe"):
+            vram = {"status": "BLOCKED", "reason": vulkan.get("legacy_reason")}
+            report.matrix["vram_correctness"] = MatrixEntry(
+                Status.BLOCKED, "LEGACY_DEVICE_INDEX_AMBIGUOUS; no allocation started"
+            )
+        else:
+            target = _confirm_bound_target(collector, target)
+            report.stage = Stage.S4_VRAM_COMPUTE
+            report.stage_history.append(Stage.S4_VRAM_COMPUTE)
+            report.matrix["vram_correctness"] = MatrixEntry(
+                Status.NOT_RUN, "legacy screen about to start after exact singleton mapping"
+            )
+            json_path, markdown_path = writer.checkpoint(report)
+            vram_log = (
+                collector.roots.run / "gpu-triage-work" / f"{writer.stem}-memtest-vulkan.log"
+            )
+            vram = driver_collector.legacy_memtest(target, vram_seconds, vram_log, vulkan)
+            vram_status = {
+                "PASS": Status.PASS,
+                "FAIL": Status.FAIL,
+                "INCONCLUSIVE": Status.INCONCLUSIVE,
+                "UNAVAILABLE": Status.UNAVAILABLE,
+                "BLOCKED": Status.BLOCKED,
+            }.get(vram.get("status"), Status.INCONCLUSIVE)
+            report.matrix["vram_correctness"] = MatrixEntry(
+                vram_status,
+                "LEGACY_SCREEN" + (f": {vram.get('reason')}" if vram.get("reason") else ""),
+            )
+
+        telemetry_after = driver_collector.telemetry(target)
+        aer_after = collector.aer(bdf)
+        aer_delta = aer_counter_delta(aer, aer_after)
+        aer_assessment = classify_aer_delta(aer_delta)
+        kernel_after = collector.kernel_log()
+        kernel_delta_available = (
+            kernel.get("source") == kernel_after.get("source")
+            and kernel.get("rc") == 0
+            and kernel_after.get("rc") == 0
+        )
+        new_kernel = (
+            new_log_lines(kernel.get("output", ""), kernel_after.get("output", ""))
+            if kernel_delta_available else []
+        )
+        relevant_new_kernel = collector.relevant_kernel_lines("\n".join(new_kernel), target)
+        failure_signals = kernel_failure_signals(relevant_new_kernel)
+
+        telemetry_available = telemetry_before.get("available") or telemetry_after.get("available")
+        report.matrix["telemetry"] = MatrixEntry(
+            Status.PASS if telemetry_available else Status.UNAVAILABLE,
+            telemetry_after.get("backend") or telemetry_before.get("backend") or "telemetry unavailable",
+        )
+        aer_status = Status(aer_assessment["status"])
+        if aer_status is Status.FAIL:
+            aer_detail = f"{len(aer_assessment['severe'])} new nonfatal/fatal counter(s)"
+        elif aer_status is Status.WARN:
+            aer_detail = f"{len(aer_assessment['correctable'])} new correctable counter(s)"
+        else:
+            aer_detail = "no positive counted error delta during Stage 3/4"
+        report.matrix["aer"] = MatrixEntry(aer_status, aer_detail)
+        if failure_signals:
+            report.matrix["driver_init"] = MatrixEntry(
+                Status.FAIL, "new kernel failure signal(s): " + ", ".join(failure_signals)
+            )
+            if "device_lost" in failure_signals and report.matrix["vram_correctness"].status is Status.PASS:
+                report.matrix["vram_correctness"] = MatrixEntry(
+                    Status.INCONCLUSIVE, "device lost signal prevents a VRAM-only verdict"
+                )
+
+        report.measurements["aer_after"] = aer_after
+        report.measurements["aer_delta"] = aer_delta
+        report.measurements["driver_bound"].update({
+            "telemetry_after": telemetry_after,
+            "vram": vram,
+            "kernel_delta_available": kernel_delta_available,
+            "kernel_before_source": kernel.get("source"),
+            "kernel_after_source": kernel_after.get("source"),
+            "kernel_new_relevant_lines": relevant_new_kernel,
+            "kernel_failure_signals": failure_signals,
+        })
+        if relevant_new_kernel:
+            report.observations.append({
+                "level": "FAIL" if failure_signals else "WARN",
+                "message": (
+                    f"{len(relevant_new_kernel)} new relevant kernel line(s) in the driver-bound window; "
+                    "see kernel sidecar."
+                ),
+            })
+        if not kernel_delta_available:
+            report.observations.append({
+                "level": "WARN",
+                "message": "Kernel before/after sources were unavailable or changed; no new-line attribution was attempted.",
+            })
+        if aer_assessment["correctable"]:
+            report.observations.append({
+                "level": "WARN",
+                "message": "New correctable AER counters were observed and are not attributed as endpoint-fatal errors.",
+            })
+        if aer_assessment["severe"]:
+            report.observations.append({
+                "level": "FAIL",
+                "message": "New nonfatal/fatal AER counters were observed; endpoint and upstream paths remain distinct in JSON.",
+            })
+
+        report.sidecars = write_driver_sidecars(
+            writer,
+            report.sidecars,
+            kernel_before=kernel,
+            kernel_after=kernel_after,
+            vram_log=vram_log,
+        )
+        legacy_completed = vram.get("kind") == "LEGACY_SCREEN"
+        report.interpretation = [
+            "The target remained on the vendor-expected driver; gpu-triage performed no module or binding action.",
+            (
+                "Vulkan mapped exactly by full PCI/DRM identity."
+                if vulkan.get("exact_match") else
+                "Vulkan identity was not proven exactly; no legacy memory allocation was permitted."
+            ),
+            (
+                "Legacy memtest results are a screen of the combined memory path, not physical-package attribution."
+                if legacy_completed else
+                "No legacy memory workload completed with a safely attributable result."
+            ),
+            "Physical VRAM package remains UNKNOWN.",
+        ]
+        report.overall = derive_overall(report.matrix, full_mode=False)
+        report.stage = Stage.COMPLETE_FAIL if report.overall is Overall.FAIL else Stage.COMPLETE_INCOMPLETE
+        report.stage_history.append(report.stage)
         json_path, markdown_path = writer.checkpoint(report)
         return report, json_path, markdown_path
     except Exception as exc:

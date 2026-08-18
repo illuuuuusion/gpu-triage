@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from triage_model import TriageReport
+from triage_model import Stage, TriageReport
 
 
 MAX_PCI_SIDECAR_BYTES = 2 * 1024 * 1024
@@ -110,6 +110,10 @@ def markdown_report(report: TriageReport) -> str:
     else:
         display_role = "no active owner observed"
     driver = identity.get("driver") if "driver" in identity else "not evaluated"
+    driver_bound_ran = Stage.S3_DRIVER_BOUND in report.stage_history
+    legacy_screen_ran = (
+        report.measurements.get("driver_bound", {}).get("vram", {}).get("kind") == "LEGACY_SCREEN"
+    )
     lines = [
         "# GPU-TRIAGE REPORT",
         "",
@@ -166,6 +170,8 @@ def markdown_report(report: TriageReport) -> str:
         "- PCI chain: " + (_one_line(" -> ".join(chain)) if chain else "not collected"),
         f"- BARs present: {len(report.measurements.get('target', {}).get('bars', []))}",
         f"- pstore: {'available' if report.measurements.get('pstore', {}).get('available') else 'unavailable/not collected'}",
+        f"- Telemetry backend: {_one_line(report.measurements.get('driver_bound', {}).get('telemetry_after', {}).get('backend') or 'not run')}",
+        f"- Vulkan mapping: {_one_line(report.measurements.get('driver_bound', {}).get('vulkan', {}).get('mapping_source') or 'not proven')}",
         "",
         "## Observations",
         "",
@@ -211,8 +217,22 @@ def markdown_report(report: TriageReport) -> str:
         "",
         "## Not Tested / Limitations",
         "",
-        "- No driver bind, module load, telemetry, Vulkan, VRAM, compute, reset, ROM or MMIO access was performed.",
-        "- A single AER snapshot cannot distinguish old/latched events from events caused by this run.",
+        "- No driver bind, module load, reset, remove, rescan, ROM or MMIO access was performed.",
+        (
+            "- Driver-bound telemetry and Vulkan identity enumeration used only the already bound expected driver."
+            if driver_bound_ran else
+            "- Driver-bound telemetry, Vulkan and VRAM were not performed in this pre-driver run."
+        ),
+        (
+            "- memtest_vulkan was used only as a legacy screen; it does not isolate VRAM, PCIe, compute or controller faults."
+            if legacy_screen_ran else
+            "- No VRAM correctness workload ran."
+        ),
+        (
+            "- AER deltas cover this process window only; they do not prove the link fault-free under other loads."
+            if driver_bound_ran else
+            "- A single AER snapshot cannot distinguish old/latched events from events caused by this run."
+        ),
         "- Allocation offsets cannot identify a physical GDDR package.",
         "- Physical VRAM package: UNKNOWN",
         "- Runtime-mirror checkpoints are volatile and are not a guarantee across power loss.",
@@ -411,4 +431,48 @@ def write_sidecars(
             writer.artifact(Path(pstore_name) / "_TRUNCATED.txt", _bounded_bytes(marker, remaining, "pstore set"))
         if copied:
             sidecars["pstore"] = pstore_name
+    return sidecars
+
+
+def write_driver_sidecars(
+    writer: CheckpointWriter,
+    sidecars: dict[str, str],
+    *,
+    kernel_before: dict[str, Any],
+    kernel_after: dict[str, Any],
+    vram_log: Path | None = None,
+) -> dict[str, str]:
+    """Persist a bounded before/after kernel window and the legacy VRAM log."""
+    kernel_name = sidecars.get("kernel", f"{writer.stem}-kernel.log")
+    heading_bytes = 96
+    per_snapshot = (MAX_KERNEL_SIDECAR_BYTES - heading_bytes) // 2
+    before = _bounded_bytes(kernel_before.get("output", ""), per_snapshot, "pre-driver kernel snapshot")
+    after = _bounded_bytes(kernel_after.get("output", ""), per_snapshot, "post-driver kernel snapshot")
+    if isinstance(before, bytes):
+        before = before.decode("utf-8", errors="replace")
+    if isinstance(after, bytes):
+        after = after.decode("utf-8", errors="replace")
+    window = (
+        "### BEFORE DRIVER-BOUND STAGE\n"
+        + before
+        + "\n\n### AFTER DRIVER-BOUND STAGE\n"
+        + after
+    )
+    writer.artifact(
+        Path(kernel_name),
+        _bounded_bytes(window, MAX_KERNEL_SIDECAR_BYTES, "kernel sidecar"),
+    )
+    sidecars["kernel"] = kernel_name
+    if vram_log is not None and vram_log.is_file():
+        try:
+            content = vram_log.read_bytes()
+        except OSError:
+            content = b""
+        if content:
+            name = f"{writer.stem}-memtest-vulkan.log"
+            writer.artifact(
+                Path(name),
+                _bounded_bytes(content, MAX_KERNEL_SIDECAR_BYTES, "VRAM sidecar"),
+            )
+            sidecars["vram_legacy"] = name
     return sidecars

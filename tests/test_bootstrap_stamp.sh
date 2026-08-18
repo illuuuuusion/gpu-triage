@@ -105,9 +105,15 @@ else
   echo "ok   safe-runtime direct role is limited to python and pciutils"
 fi
 
-grep -q 'bootstrap.sh" --profile safe-runtime' "$REPO_ROOT/start.sh" \
-  && echo "ok   start.sh requests only safe-runtime for Stage 0/1" \
-  || { echo "FAIL start.sh does not select safe-runtime"; FAILED=1; }
+grep -q 'RUNTIME_PROFILE="safe-runtime"' "$REPO_ROOT/start.sh" \
+  && echo "ok   start.sh defaults to safe-runtime for Stage 0/1" \
+  || { echo "FAIL start.sh does not default to safe-runtime"; FAILED=1; }
+grep -q 'RUNTIME_PROFILE="driver-bound-runtime"' "$REPO_ROOT/start.sh" \
+  && echo "ok   start.sh has an explicit already-bound Stage-3 profile" \
+  || { echo "FAIL start.sh does not select driver-bound-runtime"; FAILED=1; }
+grep -q 'bootstrap.sh" --profile "$RUNTIME_PROFILE"' "$REPO_ROOT/start.sh" \
+  && echo "ok   start.sh passes only its validated runtime profile" \
+  || { echo "FAIL start.sh does not pass the selected runtime profile"; FAILED=1; }
 
 if [[ $FAILED -eq 0 ]]; then
   echo "bootstrap stamp tests: PASS"

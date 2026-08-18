@@ -3,7 +3,7 @@
 ## Phase 0 — Safety-Fix (implementiert)
 
 - Bootstrap ohne `modprobe`, bind/unbind, remove, rescan oder reset
-- `quick` als deprecated Alias des read-only `triage`-Pfads
+- `quick` als deprecated Alias des adaptiven sicheren `triage`-Pfads
 - Mapper-first `BOOT.txt`
 - Safe-Boot-Anleitung mit expliziter Same-Vendor-Grenze
 
@@ -34,12 +34,26 @@ Der `/run`-Spiegel ist flüchtig und ausdrücklich keine Garantie gegen Stromaus
 oder einen vollständigen System-Lockup. Er hält den letzten synchronisierten
 Stage-Checkpoint und erlaubt die Fortsetzung, wenn nur das USB-Medium ausfällt.
 
-## Phase 3+ — siehe PLAN-SAFE-TRIAGE.md
+## Phase 3 — bereits gebundene Treiber und Isolation (implementiert, Hardwarevalidierung offen)
 
-ROM-Opt-in, driver-bound Collectors, exakte Vulkan-BDF-Zuordnung und der eigene
-VRAM-/Compute-Helper folgen in den dort definierten Phasen. Die älteren
-Versionsziele unten bleiben historische Produktideen, sind aber nicht der
-aktuelle Sicherheitsplan.
+- adaptiver Übergang nur bei bereits beobachtetem `amdgpu`/`nvidia`
+- AMD-hwmon und vorhandene AMD-RAS-Zähler read-only
+- BDF-spezifisches `nvidia-smi` mit Rückprüfung der Geräteadresse
+- Kernel- und Endpoint-/Upstream-AER-Deltas über das Driver-bound-/Lastfenster
+- exakte Vulkan-Zuordnung über vollständige PCI-BDF plus IDs oder DRM-Major/Minor
+- Legacy-`memtest_vulkan` nur bei genau einem Hardwaregerät in derselben ICD-Sicht
+- keine automatische Treiberprobe, kein Modul-Laden und keine Bindungsänderung
+
+Die Pfade sind mit AMD-/NVIDIA-, Domain-/Function-, DRM-, Mehrgeräte-, Xid- und
+AER-Fixtures hardwarefrei getestet. Die im Plan verlangten Known-good-
+Gegenproben auf echter AMD- und NVIDIA-Hardware sind noch nicht dokumentiert;
+dies ist daher weiterhin keine allgemeine Hardwarefreigabe.
+
+## Phase 4+ — siehe PLAN-SAFE-TRIAGE.md
+
+ROM-Opt-in und der eigene VRAM-/Compute-Helper folgen in den dort definierten
+Phasen. Die älteren Versionsziele unten bleiben historische Produktideen, sind
+aber nicht der aktuelle Sicherheitsplan.
 
 ## v0.1 — Repo-first Offline MVP
 

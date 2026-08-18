@@ -269,7 +269,14 @@ class TestFindMemtest(unittest.TestCase):
 
     def test_missing_memtest_yields_unavailable_not_crash(self):
         os.environ["PATH"] = str(self.tmp / "empty")
-        result = gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, self.tmp / "unused.log")
+        mapping = {
+            "status": "PASS", "exact_match": True, "target_bdf": "0000:03:00.0",
+            "hardware_device_count": 1, "legacy_safe": True,
+            "mapping_source": "VK_EXT_pci_bus_info", "vendor_id": 0x1002, "device_id": 0x73AF,
+        }
+        result = gpu_diag.run_memtest_vulkan(
+            "0000:03:00.0", 5, self.tmp / "unused.log", mapping
+        )
         self.assertEqual(result["status"], "UNAVAILABLE")
         self.assertTrue(result["reason"])
         self.assertEqual(gpu_diag.classify(base_report("UNAVAILABLE"))["overall"], "WARN")
@@ -321,10 +328,20 @@ class TestMemtestAttribution(unittest.TestCase):
         exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
         os.environ["PATH"] = str(bindir)
 
+    @staticmethod
+    def _mapping(target: str = "0000:03:00.0") -> dict:
+        return {
+            "status": "PASS", "exact_match": True, "target_bdf": target,
+            "hardware_device_count": 1, "legacy_safe": True,
+            "mapping_source": "VK_EXT_pci_bus_info", "vendor_id": 0x1002, "device_id": 0x73AF,
+        }
+
     def test_target_not_listed_is_error_despite_passing_output(self):
         """The regression: PASS text for device 0a:00 must not become PASS for 03:00."""
         self._fake_memtest(["0a:00"], tail=self.PASS_TAIL)
-        result = gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, self.tmp / "mt.log")
+        result = gpu_diag.run_memtest_vulkan(
+            "0000:03:00.0", 5, self.tmp / "mt.log", self._mapping()
+        )
         self.assertEqual(result["status"], "ERROR")
         self.assertIsNone(result["selected_index"])
         self.assertIn("did not offer", result["reason"])
@@ -333,26 +350,32 @@ class TestMemtestAttribution(unittest.TestCase):
     def test_target_not_listed_is_error_despite_failing_output(self):
         """The mirror image: another card's errors must not condemn the target."""
         self._fake_memtest(["0a:00"], tail="Error found. Total errors 42")
-        result = gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, self.tmp / "mt.log")
+        result = gpu_diag.run_memtest_vulkan(
+            "0000:03:00.0", 5, self.tmp / "mt.log", self._mapping()
+        )
         self.assertEqual(result["status"], "ERROR")
 
     def test_listed_target_is_selected_and_passes(self):
         self._fake_memtest(["0a:00", "03:00"], tail=self.PASS_TAIL)
-        result = gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, self.tmp / "mt.log")
+        result = gpu_diag.run_memtest_vulkan(
+            "0000:03:00.0", 5, self.tmp / "mt.log", self._mapping()
+        )
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["selected_index"], 2)
         self.assertIsNone(result["reason"])
 
-    def test_non_zero_domain_target_still_matches(self):
-        """memtest_vulkan prints no domain; a domain != 0000 must not be excluded."""
+    def test_non_zero_domain_target_without_exact_mapping_is_rejected(self):
+        """Bus:device output must not fabricate domain/function attribution."""
         self._fake_memtest(["03:00"], tail=self.PASS_TAIL)
         result = gpu_diag.run_memtest_vulkan("0001:03:00.0", 5, self.tmp / "mt.log")
-        self.assertEqual(result["status"], "PASS")
-        self.assertEqual(result["target_bus_device"], "03:00")
+        self.assertEqual(result["status"], "UNAVAILABLE")
+        self.assertEqual(result["reason"], "EXACT_DEVICE_MAPPING_NOT_PROVEN")
 
     def test_ambiguous_target_is_error(self):
         self._fake_memtest(["03:00", "03:00"], tail=self.PASS_TAIL)
-        result = gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, self.tmp / "mt.log")
+        result = gpu_diag.run_memtest_vulkan(
+            "0000:03:00.0", 5, self.tmp / "mt.log", self._mapping()
+        )
         self.assertEqual(result["status"], "ERROR")
         self.assertIn("unambiguously", result["reason"])
 
@@ -360,7 +383,7 @@ class TestMemtestAttribution(unittest.TestCase):
         """The summary often arrives without a trailing newline."""
         log = self.tmp / "mt.log"
         self._fake_memtest(["03:00"], tail=self.PASS_TAIL)
-        gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, log)
+        gpu_diag.run_memtest_vulkan("0000:03:00.0", 5, log, self._mapping())
         self.assertEqual(log.read_text().count(self.PASS_TAIL), 1)
 
 

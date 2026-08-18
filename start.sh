@@ -13,12 +13,14 @@ PYTHON="$(command -v python3 || command -v python || true)"
 # root and bootstrapping. If no interpreter exists yet, fall through to the
 # bootstrap path, which installs one.
 NEEDS_RUNTIME=1
+RUNTIME_PROFILE="safe-runtime"
+HELP_REQUESTED=0
 case "${1:-}" in
   list | doctor | help | --help | -h) NEEDS_RUNTIME=0 ;;
 esac
 for arg in "$@"; do
   case "$arg" in
-    -h | --help) NEEDS_RUNTIME=0 ;;
+    -h | --help) NEEDS_RUNTIME=0; HELP_REQUESTED=1 ;;
   esac
 done
 
@@ -28,6 +30,38 @@ case "${1:-}" in
   triage | quick)
     if [[ -n "$PYTHON" ]] && command -v lspci >/dev/null 2>&1; then
       NEEDS_RUNTIME=0
+    fi
+
+    # A driver-bound profile is prepared only when the explicitly selected
+    # target is already on its vendor-expected driver. This read-only routing
+    # prevents safe/unbound preflight runs from installing Vulkan or GPU-driver
+    # packages, and it never loads or binds a module.
+    PREFLIGHT_ONLY=0
+    GPU_BDF=""
+    EXPECT_GPU=0
+    for arg in "$@"; do
+      if [[ $EXPECT_GPU -eq 1 ]]; then
+        GPU_BDF="$arg"
+        EXPECT_GPU=0
+        continue
+      fi
+      case "$arg" in
+        --preflight-only) PREFLIGHT_ONLY=1 ;;
+        --gpu) EXPECT_GPU=1 ;;
+        --gpu=*) GPU_BDF="${arg#--gpu=}" ;;
+      esac
+    done
+    if [[ $HELP_REQUESTED -eq 0 && $PREFLIGHT_ONLY -eq 0 && "$GPU_BDF" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$ ]]; then
+      DEVICE_ROOT="/sys/bus/pci/devices/${GPU_BDF,,}"
+      if [[ -r "$DEVICE_ROOT/vendor" && -L "$DEVICE_ROOT/driver" ]]; then
+        VENDOR_ID="$(<"$DEVICE_ROOT/vendor")"
+        OBSERVED_DRIVER="$(basename "$(readlink -f "$DEVICE_ROOT/driver")")"
+        if [[ ( "$VENDOR_ID" == "0x1002" && "$OBSERVED_DRIVER" == "amdgpu" ) ||
+              ( "$VENDOR_ID" == "0x10de" && "$OBSERVED_DRIVER" == "nvidia" ) ]]; then
+          RUNTIME_PROFILE="driver-bound-runtime"
+          NEEDS_RUNTIME=1
+        fi
+      fi
     fi
     ;;
 esac
@@ -51,9 +85,10 @@ fi
 
 mkdir -p "$REPORT_DIR"
 
-# Stage 0/1 needs only the safe userspace profile.  This installer verifies and
-# installs files; it never loads, removes, binds, or unbinds a GPU driver.
-bash "$REPO_ROOT/scripts/bootstrap.sh" --profile safe-runtime
+# The profile was selected read-only from the requested mode and the already
+# observed binding. The installer never loads, removes, binds, or unbinds a GPU
+# driver.
+bash "$REPO_ROOT/scripts/bootstrap.sh" --profile "$RUNTIME_PROFILE"
 
 # bootstrap.sh may have installed the interpreter that was missing above.
 PYTHON="$(command -v python3 || command -v python || true)"

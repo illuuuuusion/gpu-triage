@@ -3,10 +3,9 @@
 
 Offline-first consumer GPU diagnostic orchestrator for Linux live systems.
 
-The reachable ``triage`` and deprecated ``quick`` commands both use the
-read-only Stage-0/1 implementation in safe_triage.py with Phase-2 atomic
-checkpoints. Legacy driver-bound and memtest parsing helpers remain temporarily
-for regression coverage, but no CLI route invokes them.
+The reachable ``triage`` and deprecated ``quick`` commands use the adaptive
+Stage-0/1/3/4 state machine in safe_triage.py. Driver-bound collection is only
+reachable when the expected driver was already bound before the run.
 
 No /dev/mem, no register writes, no clock/power/fan changes.
 """
@@ -448,23 +447,39 @@ def parse_memtest_device(line: str) -> tuple[int, str] | None:
     return int(m.group(1)), f"{m.group(2).lower()}:{m.group(3).lower()}"
 
 
-def run_memtest_vulkan(target_bdf: str, seconds: int, log_path: Path) -> dict[str, Any]:
+def run_memtest_vulkan(
+    target_bdf: str,
+    seconds: int,
+    log_path: Path,
+    mapping: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deprecated compatibility helper with the same Phase-3 identity gate.
+
+    The production state machine uses ``legacy_vram.run_legacy_memtest``.  This
+    wrapper remains for older callers, but bus:device output alone is no longer
+    accepted as proof for any PCI domain or function.
+    """
+    if not (
+        mapping
+        and mapping.get("mapping_source") in {"VK_EXT_pci_bus_info", "VK_EXT_physical_device_drm"}
+        and isinstance(mapping.get("vendor_id"), int)
+        and isinstance(mapping.get("device_id"), int)
+        and mapping.get("status") == "PASS"
+        and mapping.get("exact_match") is True
+        and mapping.get("target_bdf") == target_bdf
+        and mapping.get("hardware_device_count") == 1
+        and mapping.get("legacy_safe") is True
+    ):
+        return {"status": "UNAVAILABLE", "reason": "EXACT_DEVICE_MAPPING_NOT_PROVEN"}
     exe = find_memtest()
     if not exe:
         return {"status": "UNAVAILABLE", "reason": memtest_missing_reason()}
 
     cmd = [exe]
     env = os.environ.copy()
-    # Prefer only the relevant vendor ICD when well-known paths exist. This reduces accidental iGPU selection.
-    vendor = read_num(SYS_PCI / target_bdf / "vendor", 16)
-    icd_candidates: list[str] = []
-    if vendor == 0x10DE:
-        icd_candidates = ["/usr/share/vulkan/icd.d/nvidia_icd.json"]
-    elif vendor == 0x1002:
-        icd_candidates = ["/usr/share/vulkan/icd.d/radeon_icd.x86_64.json", "/usr/share/vulkan/icd.d/radeon_icd.json"]
-    icds = [p for p in icd_candidates if Path(p).exists()]
-    if icds:
-        env["VK_DRIVER_FILES"] = os.pathsep.join(icds)
+    # Keep the caller's Vulkan environment unchanged. The exact mapper and
+    # memtest must observe the same ICD view; silently filtering it here would
+    # invalidate the singleton proof.
 
     started = time.monotonic()
     chunks: list[str] = []
@@ -960,6 +975,9 @@ def run_safe_cli(args: argparse.Namespace) -> int:
             gpu_arg=args.gpu,
             report_dir_arg=args.report_dir,
             repo_root=REPO_ROOT,
+            preflight_only=args.preflight_only,
+            no_vram=args.no_vram,
+            vram_seconds=args.vram_seconds,
         )
     except SafeTriageError as exc:
         raise DiagError(str(exc)) from exc
@@ -991,15 +1009,15 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="verify report target, pinned bundle, kernel and safe runtime")
     doctor.add_argument("--report-dir", help="explicit atomically writable report directory")
     for command, help_text in (
-        ("triage", "run read-only Stage 0/1 triage"),
+        ("triage", "run adaptive safe triage for an explicitly selected GPU"),
         ("quick", "deprecated alias for safe triage"),
     ):
         q = sub.add_parser(command, help=help_text)
         q.add_argument("--gpu", required=True, help="exact target PCI BDF, e.g. 0000:03:00.0")
-        q.add_argument("--preflight-only", action="store_true", help="stop after read-only Stage 1 (currently always true)")
+        q.add_argument("--preflight-only", action="store_true", help="stop after read-only Stage 1")
         q.add_argument("--rom", action="store_true", help="reserved explicit ROM opt-in (not enabled yet)")
-        q.add_argument("--vram-seconds", type=int, default=60, help="reserved for a future exact-mapped VRAM stage")
-        q.add_argument("--no-vram", action="store_true", help="compatibility flag; Stage 1 never runs VRAM")
+        q.add_argument("--vram-seconds", type=int, default=60, help="duration of the strictly gated legacy VRAM screen")
+        q.add_argument("--no-vram", action="store_true", help="collect driver-bound evidence without VRAM load")
         q.add_argument("--report-dir", help="explicit atomically writable report directory")
     return p
 
@@ -1018,7 +1036,7 @@ def main() -> int:
             if args.vram_seconds < 5 or args.vram_seconds > 3600:
                 raise DiagError("--vram-seconds must be between 5 and 3600")
             if args.command == "quick":
-                print("WARNING: 'quick' is deprecated; running read-only 'triage'.", file=sys.stderr)
+                print("WARNING: 'quick' is deprecated; running adaptive safe 'triage'.", file=sys.stderr)
             return run_safe_cli(args)
         parser.error("unknown command")
     except KeyboardInterrupt:
