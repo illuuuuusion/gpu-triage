@@ -20,12 +20,26 @@
 Die AMD-/NVIDIA-Known-good-Gegenproben auf echter Hardware sind noch nicht
 dokumentiert. Daher ist dies eine Implementierungs-, keine Hardwarefreigabe.
 
-## Phase 2+ — siehe PLAN-SAFE-TRIAGE.md
+## Phase 2 — kompakter, crash-toleranter Report (implementiert)
 
-Crash-tolerante Stage-Checkpoints, ROM-Opt-in, driver-bound Collectors, exakte
-Vulkan-BDF-Zuordnung und der eigene VRAM-/Compute-Helper folgen in den dort
-definierten Phasen. Die älteren Versionsziele unten bleiben historische
-Produktideen, sind aber nicht der aktuelle Sicherheitsplan.
+- feste Statusmatrix und getrennte Messungen, Beobachtungen, Interpretation und Hypothesen
+- Markdown-Primärreport mit erzwungenem Budget von 50–120 Zeilen ohne Raw-Dumps
+- begrenzte PCI-, Kernel- und pstore-Sidecars
+- atomare Markdown-/JSON-Checkpoints mit `fsync` an jeder Stage-Grenze
+- fortlaufender Runtime-Spiegel unter `/run/gpu-triage`
+- failover bei ausfallendem Primärmedium mit sichtbarem Persistenzverlust
+- künstliche Stage- und Read-only-Fehler als hardwarefreie Regressionstests
+
+Der `/run`-Spiegel ist flüchtig und ausdrücklich keine Garantie gegen Stromausfall
+oder einen vollständigen System-Lockup. Er hält den letzten synchronisierten
+Stage-Checkpoint und erlaubt die Fortsetzung, wenn nur das USB-Medium ausfällt.
+
+## Phase 3+ — siehe PLAN-SAFE-TRIAGE.md
+
+ROM-Opt-in, driver-bound Collectors, exakte Vulkan-BDF-Zuordnung und der eigene
+VRAM-/Compute-Helper folgen in den dort definierten Phasen. Die älteren
+Versionsziele unten bleiben historische Produktideen, sind aber nicht der
+aktuelle Sicherheitsplan.
 
 ## v0.1 — Repo-first Offline MVP
 

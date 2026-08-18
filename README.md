@@ -18,7 +18,7 @@ noch VRAM-Last aus.
 Der Diagnose-PC benötigt dabei **kein Internet**: Live-System, Anwendung, Pakete
 und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 
-- **Status:** Safe-Triage Phase 1, siehe [ROADMAP.md](ROADMAP.md)
+- **Status:** Safe-Triage Phase 2, siehe [ROADMAP.md](ROADMAP.md)
 - **Erkannt:** AMD-/NVIDIA-PCI-Geräte der Display-/3D-Klasse
 - **Hardwarevalidiert:** noch keine allgemeine Serienfreigabe; Validierungsstand
   und Same-Vendor-Grenze stehen in [docs/SAFE-BOOT.md](docs/SAFE-BOOT.md)
@@ -41,7 +41,7 @@ und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 
 ## Funktionsumfang
 
-Phase 1 erhebt pro Zielkarte:
+Der aktuelle Stage-0/1-Lauf erhebt pro Zielkarte:
 
 | Bereich | Belege |
 | --- | --- |
@@ -51,7 +51,7 @@ Phase 1 erhebt pro Zielkarte:
 | Fehler | Endpoint-/Upstream-AER-Snapshot ohne erfundenes Last-Delta |
 | Kernel | vollständiger Sidecar plus relevante GPU/AER/Lockup-Zeilen |
 | Persistenz | pstore-Verfügbarkeit und unveränderte Kopie vorhandener Records |
-| Ausgabe | kompakter Markdown- und JSON-Report plus begrenzte Raw-Sidecars |
+| Ausgabe | kompakter Markdown- und JSON-Report, atomare Stage-Checkpoints plus begrenzte Raw-Sidecars |
 
 
 ## Voraussetzungen
@@ -156,7 +156,7 @@ start.sh --help
 
 `triage` verlangt immer eine vollständige PCI-Adresse einschließlich Domain und
 Function (`0000:03:00.0`). Es gibt keine automatische oder interaktive Auswahl.
-`--rom` ist in Phase 1 fail-closed reserviert und aktiviert noch keinen ROM-Zugriff.
+`--rom` ist fail-closed reserviert und aktiviert noch keinen ROM-Zugriff.
 
 ### Bootstrap
 
@@ -185,6 +185,20 @@ Reports landen standardmäßig in `reports/` — also auf demselben USB-Stick �
 Markdown- und JSON-Datei, ergänzt um `-kernel.log`, `-lspci.txt` und bei Bedarf
 ein `-pstore/`-Verzeichnis.
 
+Bei jedem Zustandswechsel (`S0_ENVIRONMENT`, `S1_PRE_DRIVER`, Abschluss oder
+Abbruch) werden Markdown und JSON über eine temporäre Datei, `fsync` und
+atomisches Umbenennen ersetzt. Parallel liegt derselbe aktuelle Checkpoint
+unter `/run/gpu-triage`. Sidecars werden ebenfalls atomar gespiegelt und sind
+begrenzt: PCI- und Kernel-Sidecar auf jeweils 2 MiB, einzelne pstore-Records auf
+1 MiB sowie alle pstore-Kopien zusammen auf 4 MiB und 32 Records.
+
+Wird das USB-/Primärmedium während des Laufs read-only oder verschwindet, läuft
+die Erfassung im `/run`-Spiegel weiter. CLI, Markdown und JSON melden dann
+`Persistent-medium loss: YES` und geben den aktiven Runtime-Pfad aus. `/run` ist
+flüchtig: Diese Spiegelung schützt gegen beschädigte Reportdateien und kann
+nach einem Medienfehler noch kopiert werden, ist aber ausdrücklich keine
+Crash- oder Power-Loss-Garantie.
+
 Stage 1 endet absichtlich `INCOMPLETE`: Treiberinitialisierung, Telemetrie,
 Vulkan, VRAM und Compute werden nicht gestartet. Ein ungebundenes Target ohne
 belegte Blacklist/Quarantäne ergibt dagegen einen klaren Driver-Init-`FAIL`.
@@ -197,7 +211,7 @@ Reportziel atomar beschreibbar? → BDF exakt? → Display-Risiko ausgeschlossen
 → Treiber-Intent beobachtet? → PCI/AER/Kernel/pstore read-only erfassen
 ```
 
-Driver-bound- und Vulkan-Zuordnung folgen erst in Phase 3. Der Phase-1-Pfad
+Driver-bound- und Vulkan-Zuordnung folgen erst in Phase 3. Der aktuelle Pfad
 öffnet deshalb kein Vulkan-Gerät und kann kein VRAM-`PASS` erzeugen.
 
 ### Exit-Codes
@@ -231,7 +245,7 @@ gpu-triage/
 │   ├── safe_triage.py          # Stage-0/1-Orchestrator
 │   ├── collectors.py           # ausschließlich read-only Collector
 │   ├── triage_model.py         # Status-, Stage- und Resultmodell
-│   └── reporting.py            # Markdown/JSON und Sidecars
+│   └── reporting.py            # kompakte Reports, Checkpoints, Spiegel und Sidecars
 ├── scripts/
 │   └── bootstrap.sh            # Offline-Runtime installieren, keine Treiberaktion
 ├── offline/

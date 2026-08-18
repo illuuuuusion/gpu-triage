@@ -4,9 +4,9 @@
 Offline-first consumer GPU diagnostic orchestrator for Linux live systems.
 
 The reachable ``triage`` and deprecated ``quick`` commands both use the
-read-only Stage-0/1 implementation in safe_triage.py.  Legacy driver-bound and
-memtest parsing helpers remain temporarily for regression coverage, but no CLI
-route invokes them in Phase 1.
+read-only Stage-0/1 implementation in safe_triage.py with Phase-2 atomic
+checkpoints. Legacy driver-bound and memtest parsing helpers remain temporarily
+for regression coverage, but no CLI route invokes them.
 
 No /dev/mem, no register writes, no clock/power/fan changes.
 """
@@ -954,7 +954,7 @@ def interactive_main(parser: argparse.ArgumentParser) -> int:
 
 def run_safe_cli(args: argparse.Namespace) -> int:
     if getattr(args, "rom", False):
-        raise DiagError("--rom belongs to Phase 2 and is not enabled by this safe pre-driver implementation")
+        raise DiagError("--rom is reserved and is not enabled by this safe pre-driver implementation")
     try:
         report, json_path, markdown_path = run_pre_driver_triage(
             gpu_arg=args.gpu,
@@ -968,6 +968,12 @@ def run_safe_cli(args: argparse.Namespace) -> int:
     print(f"Overall: {report.overall.value}")
     print(f"JSON:    {json_path}")
     print(f"REPORT:  {markdown_path}")
+    if report.persistence.get("persistence_lost"):
+        print(
+            "WARNING: The requested report medium failed. Evidence exists only "
+            f"in the volatile runtime mirror: {report.persistence.get('active_dir')}",
+            file=sys.stderr,
+        )
     return 0 if report.overall.value == "PASS" else 1
 
 
@@ -991,7 +997,7 @@ def build_parser() -> argparse.ArgumentParser:
         q = sub.add_parser(command, help=help_text)
         q.add_argument("--gpu", required=True, help="exact target PCI BDF, e.g. 0000:03:00.0")
         q.add_argument("--preflight-only", action="store_true", help="stop after read-only Stage 1 (currently always true)")
-        q.add_argument("--rom", action="store_true", help="reserved explicit ROM opt-in (not enabled in Phase 1)")
+        q.add_argument("--rom", action="store_true", help="reserved explicit ROM opt-in (not enabled yet)")
         q.add_argument("--vram-seconds", type=int, default=60, help="reserved for a future exact-mapped VRAM stage")
         q.add_argument("--no-vram", action="store_true", help="compatibility flag; Stage 1 never runs VRAM")
         q.add_argument("--report-dir", help="explicit atomically writable report directory")

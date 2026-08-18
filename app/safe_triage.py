@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from collectors import ReadOnlyCollector, SUPPORTED_VENDORS, positive_counter_paths
-from reporting import validate_report_directory, write_report, write_sidecars
+from reporting import CheckpointWriter, ReportWriteError, validate_report_directory, write_sidecars
 from triage_model import DriverState, MatrixEntry, Overall, Stage, Status, TriageReport, derive_overall
 
 
@@ -161,121 +161,175 @@ def run_pre_driver_triage(
     except RuntimeError as exc:
         raise SafeTriageError(str(exc)) from exc
 
-    bdf = normalize_explicit_bdf(gpu_arg)
-    target = collector.target(bdf)
-    if target is None:
-        detected = ", ".join(item.bdf for item in collector.display_devices()) or "none"
-        raise SafeTriageError(f"GPU {bdf} was not found exactly. Display devices: {detected}")
-    if target.vendor_id not in SUPPORTED_VENDORS or target.class_code & 0xFFFF00 not in {0x030000, 0x030200, 0x038000}:
-        raise SafeTriageError(f"Target {bdf} is not a supported AMD/NVIDIA display/3D PCI device")
-
-    display = collector.display_risk(target)
-    if display["risk"]:
-        raise SafeTriageError(f"DISPLAY_RISK for {bdf}: {'; '.join(display['reasons'])}")
-
-    intent = collector.driver_intent(target)
-    if intent["safe_boot_claimed"] and target.driver:
-        raise SafeTriageError(
-            f"Safe boot is claimed, but {bdf} is already bound to {target.driver}; refusing device-interactive work"
-        )
-    if (
-        intent["state"] == DriverState.INTENTIONAL_GLOBAL_BLACKLIST.value
-        and intent["same_vendor_display_devices"]
-    ):
-        peers = ", ".join(intent["same_vendor_display_devices"])
-        raise SafeTriageError(f"BLOCKED: SAFE_BOOT_NOT_PROVEN (same-vendor display device(s): {peers})")
-
-    environment = collector.environment(repo_root)
-    measurements = collector.target_measurements(target)
-    aer = collector.aer(bdf)
-    pci = collector.pci_commands(bdf)
-    kernel = collector.kernel_log()
-    relevant_kernel = collector.relevant_kernel_lines(kernel.get("output", ""), target)
-    pstore = collector.pstore()
-
     timestamp = dt.datetime.now().astimezone()
+    bdf = normalize_explicit_bdf(gpu_arg)
     stem = f"gpu-triage-{timestamp.strftime('%Y%m%d-%H%M%S')}-{bdf.replace(':', '_')}"
-    sidecars = write_sidecars(report_dir, stem, pci, kernel, pstore)
-
-    observations = _aer_observations(aer)
-    if relevant_kernel:
-        observations.append({
-            "level": "WARN",
-            "message": f"{len(relevant_kernel)} relevant kernel line(s) preserved in the kernel sidecar.",
-        })
-    if pstore.get("entries"):
-        observations.append({
-            "level": "WARN",
-            "message": f"{len(pstore['entries'])} persistent pstore record(s) copied; gpu-triage did not delete them.",
-        })
-
-    link = measurements["link"]
-    current_width = _link_width(link.get("current_link_width"))
-    maximum_width = _link_width(link.get("max_link_width"))
-    if current_width is None:
-        link_entry = MatrixEntry(Status.UNAVAILABLE, "current link width unavailable")
-    elif maximum_width is not None and current_width < maximum_width:
-        link_entry = MatrixEntry(Status.WARN, f"x{current_width}, endpoint max x{maximum_width}; platform expectation unknown")
-    else:
-        link_entry = MatrixEntry(Status.PASS, f"{link.get('current_link_speed') or '?'} x{current_width}")
-
-    state = DriverState(intent["state"])
-    if state in {DriverState.QUARANTINED_BDF, DriverState.INTENTIONAL_GLOBAL_BLACKLIST}:
-        driver_entry = MatrixEntry(Status.NOT_RUN, f"intentional safe mode ({state.value})")
-        interactive_status = Status.UNSAFE_SKIPPED
-    elif state is DriverState.UNBOUND_UNEXPLAINED:
-        driver_entry = MatrixEntry(Status.FAIL, "target is unbound without proven quarantine/blacklist")
-        interactive_status = Status.BLOCKED
-    elif state is DriverState.BOUND_EXPECTED:
-        driver_entry = MatrixEntry(Status.PASS, f"expected driver {target.driver} already bound; not invoked")
-        interactive_status = Status.NOT_RUN
-    else:
-        driver_entry = MatrixEntry(Status.BLOCKED, f"observed driver {target.driver or 'none'}")
-        interactive_status = Status.BLOCKED
-
-    matrix = {
-        "pci_enumeration": MatrixEntry(Status.PASS, "target exists at exact BDF"),
-        "target_identity": MatrixEntry(Status.PASS, "vendor/device/class/subsystem read from sysfs"),
-        "pcie_link": link_entry,
-        "aer": MatrixEntry(Status.WARN if _aer_observations(aer) else (Status.PASS if aer["available"] else Status.UNAVAILABLE),
-                           "snapshot only; no active counted errors observed" if not _aer_observations(aer) else "pre-existing counters observed"),
-        "driver_init": driver_entry,
-        "telemetry": MatrixEntry(interactive_status, "Stage 1 performs no driver-interactive calls"),
-        "vulkan": MatrixEntry(interactive_status, "Stage 1 performs no Vulkan enumeration"),
-        "vbios_rom": MatrixEntry(Status.NOT_RUN, "ROM is a separate opt-in stage"),
-        "vram_correctness": MatrixEntry(Status.NOT_RUN, "no safely initialized exact-mapped Vulkan device tested"),
-        "compute": MatrixEntry(Status.NOT_RUN, "not part of safe preflight"),
-        "physical_vram_package": MatrixEntry(Status.UNKNOWN, "no validated ASIC/board mapping"),
-    }
+    writer = CheckpointWriter(report_dir, collector.roots.run / "gpu-triage", stem)
     report = TriageReport(
         schema=2,
-        tool="gpu-triage-safe-preflight",
+        tool="gpu-triage-safe-triage",
         timestamp=timestamp.isoformat(),
-        stage=Stage.COMPLETE_INCOMPLETE,
-        stage_history=[Stage.START, Stage.S0_ENVIRONMENT, Stage.S1_PRE_DRIVER, Stage.COMPLETE_INCOMPLETE],
+        stage=Stage.S0_ENVIRONMENT,
+        stage_history=[Stage.START, Stage.S0_ENVIRONMENT],
         target={"bdf": bdf},
-        environment=environment,
-        safety={"display_risk": display, "driver_intent": intent},
-        measurements={
+        environment={},
+        safety={},
+        measurements={},
+        overall=Overall.INCOMPLETE,
+    )
+
+    try:
+        # START -> S0 is persisted before the first target lookup. A failure in
+        # any Stage-0 gate therefore still leaves a parseable INCOMPLETE report.
+        json_path, markdown_path = writer.checkpoint(report)
+
+        target = collector.target(bdf)
+        if target is None:
+            detected = ", ".join(item.bdf for item in collector.display_devices()) or "none"
+            raise SafeTriageError(f"GPU {bdf} was not found exactly. Display devices: {detected}")
+        if (
+            target.vendor_id not in SUPPORTED_VENDORS
+            or target.class_code & 0xFFFF00 not in {0x030000, 0x030200, 0x038000}
+        ):
+            raise SafeTriageError(f"Target {bdf} is not a supported AMD/NVIDIA display/3D PCI device")
+
+        display = collector.display_risk(target)
+        intent = collector.driver_intent(target)
+        report.safety = {"display_risk": display, "driver_intent": intent}
+        if display["risk"]:
+            raise SafeTriageError(f"DISPLAY_RISK for {bdf}: {'; '.join(display['reasons'])}")
+        if intent["safe_boot_claimed"] and target.driver:
+            raise SafeTriageError(
+                f"Safe boot is claimed, but {bdf} is already bound to {target.driver}; refusing device-interactive work"
+            )
+        if (
+            intent["state"] == DriverState.INTENTIONAL_GLOBAL_BLACKLIST.value
+            and intent["same_vendor_display_devices"]
+        ):
+            peers = ", ".join(intent["same_vendor_display_devices"])
+            raise SafeTriageError(f"BLOCKED: SAFE_BOOT_NOT_PROVEN (same-vendor display device(s): {peers})")
+
+        report.environment = collector.environment(repo_root)
+        report.stage = Stage.S1_PRE_DRIVER
+        report.stage_history.append(Stage.S1_PRE_DRIVER)
+        json_path, markdown_path = writer.checkpoint(report)
+
+        measurements = collector.target_measurements(target)
+        aer = collector.aer(bdf)
+        pci = collector.pci_commands(bdf)
+        kernel = collector.kernel_log()
+        relevant_kernel = collector.relevant_kernel_lines(kernel.get("output", ""), target)
+        pstore = collector.pstore()
+        sidecars = write_sidecars(writer, pci, kernel, pstore)
+
+        observations = _aer_observations(aer)
+        if relevant_kernel:
+            observations.append({
+                "level": "WARN",
+                "message": f"{len(relevant_kernel)} relevant kernel line(s) preserved in the kernel sidecar.",
+            })
+        if pstore.get("entries"):
+            observations.append({
+                "level": "WARN",
+                "message": (
+                    f"{len(pstore['entries'])} persistent pstore record(s) found; bounded copies were preserved "
+                    "and gpu-triage did not delete the originals."
+                ),
+            })
+
+        link = measurements["link"]
+        current_width = _link_width(link.get("current_link_width"))
+        maximum_width = _link_width(link.get("max_link_width"))
+        if current_width is None:
+            link_entry = MatrixEntry(Status.UNAVAILABLE, "current link width unavailable")
+        elif maximum_width is not None and current_width < maximum_width:
+            link_entry = MatrixEntry(
+                Status.WARN,
+                f"x{current_width}, endpoint max x{maximum_width}; platform expectation unknown",
+            )
+        else:
+            link_entry = MatrixEntry(Status.PASS, f"{link.get('current_link_speed') or '?'} x{current_width}")
+
+        state = DriverState(intent["state"])
+        if state in {DriverState.QUARANTINED_BDF, DriverState.INTENTIONAL_GLOBAL_BLACKLIST}:
+            driver_entry = MatrixEntry(Status.NOT_RUN, f"intentional safe mode ({state.value})")
+            interactive_status = Status.UNSAFE_SKIPPED
+        elif state is DriverState.UNBOUND_UNEXPLAINED:
+            driver_entry = MatrixEntry(Status.FAIL, "target is unbound without proven quarantine/blacklist")
+            interactive_status = Status.BLOCKED
+        elif state is DriverState.BOUND_EXPECTED:
+            driver_entry = MatrixEntry(Status.PASS, f"expected driver {target.driver} already bound; not invoked")
+            interactive_status = Status.NOT_RUN
+        else:
+            driver_entry = MatrixEntry(Status.BLOCKED, f"observed driver {target.driver or 'none'}")
+            interactive_status = Status.BLOCKED
+
+        matrix = {
+            "pci_enumeration": MatrixEntry(Status.PASS, "target exists at exact BDF"),
+            "target_identity": MatrixEntry(Status.PASS, "vendor/device/class/subsystem read from sysfs"),
+            "pcie_link": link_entry,
+            "aer": MatrixEntry(
+                Status.WARN if _aer_observations(aer) else (Status.PASS if aer["available"] else Status.UNAVAILABLE),
+                "snapshot only; no active counted errors observed"
+                if not _aer_observations(aer)
+                else "pre-existing counters observed",
+            ),
+            "driver_init": driver_entry,
+            "telemetry": MatrixEntry(interactive_status, "Stage 1 performs no driver-interactive calls"),
+            "vulkan": MatrixEntry(interactive_status, "Stage 1 performs no Vulkan enumeration"),
+            "vbios_rom": MatrixEntry(Status.NOT_RUN, "ROM is a separate opt-in stage"),
+            "vram_correctness": MatrixEntry(Status.NOT_RUN, "no safely initialized exact-mapped Vulkan device tested"),
+            "compute": MatrixEntry(Status.NOT_RUN, "not part of safe preflight"),
+            "physical_vram_package": MatrixEntry(Status.UNKNOWN, "no validated ASIC/board mapping"),
+        }
+        report.measurements = {
             "target": measurements,
             "aer": aer,
             "kernel": {"source": kernel.get("source"), "relevant_lines": relevant_kernel},
-            "pstore": {"available": pstore.get("available", False), "entries": [
-                {"name": item.get("name"), "size": item.get("size")} for item in pstore.get("entries", [])
-            ]},
-            "pci_commands": {name: {"cmd": value.get("cmd"), "rc": value.get("rc")} for name, value in pci.items()},
-        },
-        observations=observations,
-        interpretation=[
+            "pstore": {
+                "available": pstore.get("available", False),
+                "entries": [
+                    {"name": item.get("name"), "size": item.get("size")}
+                    for item in pstore.get("entries", [])[:128]
+                ],
+                "omitted_entry_metadata": max(0, len(pstore.get("entries", [])) - 128),
+            },
+            "pci_commands": {
+                name: {"cmd": value.get("cmd"), "rc": value.get("rc")}
+                for name, value in pci.items()
+            },
+        }
+        report.observations = observations
+        report.interpretation = [
             "PCI identity, topology, BARs, link state and AER availability were collected read-only.",
             "No driver initialization was attempted; driver-bound correctness remains untested.",
             "VRAM/compute and physical memory-package attribution remain unproven.",
-        ],
-        hypotheses=[],
-        matrix=matrix,
-        overall=Overall.INCOMPLETE,
-        sidecars=sidecars,
-    )
-    report.overall = derive_overall(matrix, full_mode=False)
-    json_path, markdown_path = write_report(report, report_dir, stem)
-    return report, json_path, markdown_path
+        ]
+        report.matrix = matrix
+        report.sidecars = sidecars
+        report.overall = derive_overall(matrix, full_mode=False)
+        report.stage = Stage.COMPLETE_INCOMPLETE
+        report.stage_history.append(Stage.COMPLETE_INCOMPLETE)
+        json_path, markdown_path = writer.checkpoint(report)
+        return report, json_path, markdown_path
+    except Exception as exc:
+        failed_stage = report.stage.value
+        report.stage = Stage.ABORTED
+        if not report.stage_history or report.stage_history[-1] is not Stage.ABORTED:
+            report.stage_history.append(Stage.ABORTED)
+        report.overall = Overall.INCOMPLETE
+        report.observations.append({
+            "level": "ERROR",
+            "message": f"Run aborted during {failed_stage}: {type(exc).__name__}: {exc}",
+        })
+        checkpoint_detail = ""
+        try:
+            json_path, _ = writer.checkpoint(report)
+            checkpoint_detail = f" Last checkpoint: {json_path}"
+        except (OSError, ReportWriteError, ValueError) as checkpoint_exc:
+            checkpoint_detail = f" Checkpoint persistence also failed: {checkpoint_exc}"
+        if isinstance(exc, SafeTriageError):
+            raise SafeTriageError(f"{exc}.{checkpoint_detail}") from exc
+        raise SafeTriageError(
+            f"Triage aborted during {failed_stage}: {type(exc).__name__}: {exc}.{checkpoint_detail}"
+        ) from exc
