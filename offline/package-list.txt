@@ -1,5 +1,6 @@
-# Runtime packages installed into the official Arch live session.
-# Keep this list deliberately small. Dependencies are collected by build_bundle.sh.
+# Union of all runtime profiles. Dependencies are collected by build_bundle.sh.
+# Role ownership is defined in package-list-safe.txt and
+# package-list-driver-bound.txt; build_bundle.sh emits exact per-profile files.
 python
 pciutils
 vulkan-tools

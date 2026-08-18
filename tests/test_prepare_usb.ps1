@@ -108,6 +108,16 @@ try {
     ) | Set-Content -LiteralPath (Join-Path $BundleSource 'manifest.env') -Encoding ASCII
     "$PackageSha  packages/$PackageName" |
         Set-Content -LiteralPath (Join-Path $BundleSource 'SHA256SUMS') -Encoding ASCII
+    $BundleProfiles = Join-Path $BundleSource 'profiles'
+    New-Item -ItemType Directory -Force -Path $BundleProfiles | Out-Null
+    "packages/$PackageName" | Set-Content -LiteralPath (Join-Path $BundleProfiles 'safe-runtime.files') -Encoding ASCII
+    "packages/$PackageName" | Set-Content -LiteralPath (Join-Path $BundleProfiles 'driver-bound-runtime.files') -Encoding ASCII
+    $safeProfileSha = (Get-FileHash -LiteralPath (Join-Path $BundleProfiles 'safe-runtime.files') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $driverProfileSha = (Get-FileHash -LiteralPath (Join-Path $BundleProfiles 'driver-bound-runtime.files') -Algorithm SHA256).Hash.ToLowerInvariant()
+    @(
+        "$safeProfileSha  profiles/safe-runtime.files"
+        "$driverProfileSha  profiles/driver-bound-runtime.files"
+    ) | Set-Content -LiteralPath (Join-Path $BundleSource 'PROFILE-SHA256SUMS') -Encoding ASCII
     'base 1.0-1' | Set-Content -LiteralPath (Join-Path $BundleSource 'excluded.txt') -Encoding ASCII
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::CreateFromDirectory(
@@ -142,6 +152,19 @@ try {
     Assert-True 'bundle package is mirrored to fake stick' `
         (Test-Path (Join-Path "$Drive\gpu-triage\offline\packages" $PackageName))
     Assert-True 'BOOT.txt is written' (Test-Path "$Drive\BOOT.txt")
+    $bootText = Get-Content -LiteralPath "$Drive\BOOT.txt" -Raw
+    $mapperIndex = $bootText.IndexOf('/dev/mapper/${d##*/}')
+    $rawIndex = $bootText.IndexOf('mount "$d"')
+    Assert-True 'BOOT.txt derives the raw node from the Ventoy label link' `
+        $bootText.Contains('readlink -f /dev/disk/by-label/Ventoy') $bootText
+    Assert-True 'BOOT.txt tries the mapper node before the raw partition' `
+        ($mapperIndex -ge 0 -and $rawIndex -gt $mapperIndex) $bootText
+    Assert-True 'SAFE-BOOT.txt is written' (Test-Path "$Drive\SAFE-BOOT.txt")
+    $safeBootText = Get-Content -LiteralPath "$Drive\SAFE-BOOT.txt" -Raw
+    Assert-True 'SAFE-BOOT.txt carries both vendor profiles and the same-vendor block' `
+        ($safeBootText.Contains('module_blacklist=amdgpu,radeon') -and
+         $safeBootText.Contains('module_blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm') -and
+         $safeBootText.Contains('SAFE_BOOT_NOT_PROVEN')) $safeBootText
     Assert-True 'verification state is written' (Test-Path "$Drive\.gpu-triage-state.json")
 
     $second = Invoke-Prepare $common

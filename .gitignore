@@ -7,6 +7,8 @@ offline/packages/*.sig
 offline/SHA256SUMS
 offline/manifest.env
 offline/excluded.txt
+offline/PROFILE-SHA256SUMS
+offline/profiles/*.files
 offline/dist/
 offline/.dlcache/
 

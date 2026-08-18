@@ -499,9 +499,20 @@ function Test-BundleComplete {
 
     $manifestPath = Join-Path $OfflinePath 'manifest.env'
     $sumsPath = Join-Path $OfflinePath 'SHA256SUMS'
+    $profileSumsPath = Join-Path $OfflinePath 'PROFILE-SHA256SUMS'
 
     if (-not (Test-Path -LiteralPath $manifestPath)) { $Reason.Value = 'manifest.env missing'; return $false }
     if (-not (Test-Path -LiteralPath $sumsPath)) { $Reason.Value = 'SHA256SUMS missing'; return $false }
+    $profileFiles = @('safe-runtime.files', 'driver-bound-runtime.files')
+    $presentProfiles = @($profileFiles | Where-Object {
+        Test-Path -LiteralPath (Join-Path $OfflinePath "profiles\$_")
+    })
+    $hasProfileSums = Test-Path -LiteralPath $profileSumsPath
+    if (($presentProfiles.Count -gt 0 -or $hasProfileSums) -and
+        ($presentProfiles.Count -ne $profileFiles.Count -or -not $hasProfileSums)) {
+        $Reason.Value = 'runtime profile metadata is only partially present'
+        return $false
+    }
 
     $manifest = Read-Manifest $manifestPath
     if ($manifest['ARCHISO_DATE'] -ne $Release.iso_date) {
@@ -524,7 +535,8 @@ function Test-BundleComplete {
         return $false
     }
 
-    $Reason.Value = "$($entries.Count) packages, ISO $($manifest['ARCHISO_DATE']), kernel $($manifest['EXPECTED_KERNEL'])"
+    $profileNote = if ($hasProfileSums) { ', role profiles present' } else { ', legacy bundle (safe tools must come from ISO)' }
+    $Reason.Value = "$($entries.Count) packages, ISO $($manifest['ARCHISO_DATE']), kernel $($manifest['EXPECTED_KERNEL'])$profileNote"
     return $true
 }
 
@@ -549,9 +561,13 @@ function Expand-Bundle {
         Get-ChildItem -LiteralPath $packages -File -Force | Where-Object { $_.Name -ne '.gitkeep' } |
             Remove-Item -Force
     }
-    foreach ($stale in @('manifest.env', 'SHA256SUMS', 'excluded.txt')) {
+    foreach ($stale in @('manifest.env', 'SHA256SUMS', 'PROFILE-SHA256SUMS', 'excluded.txt')) {
         $path = Join-Path $Target $stale
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    }
+    $profiles = Join-Path $Target 'profiles'
+    if (Test-Path -LiteralPath $profiles) {
+        Get-ChildItem -LiteralPath $profiles -File -Filter '*.files' | Remove-Item -Force
     }
 
     $targetFull = (Resolve-Path -LiteralPath $Target).Path.TrimEnd('\') + '\'
@@ -587,7 +603,7 @@ function Expand-Bundle {
 function Write-BootTxt {
     param([string]$DriveLetter, $Release)
 
-    $oneLiner = 'm=/mnt/v; mkdir -p $m; mount /dev/disk/by-label/Ventoy $m; bash $m/gpu-triage/go.sh list'
+    $oneLiner = 'd=$(readlink -f /dev/disk/by-label/Ventoy); m=/mnt/v; mkdir -p $m; mount /dev/mapper/${d##*/} $m || mount "$d" $m; bash $m/gpu-triage/go.sh list'
     $lines = @(
         'gpu-triage - what to type after booting'
         '======================================='
@@ -599,7 +615,7 @@ function Write-BootTxt {
         ''
         '   It mounts the stick and lists the GPUs it can see. To run a diagnosis:'
         ''
-        '   bash $m/gpu-triage/go.sh quick --gpu 0000:03:00.0'
+        '   bash $m/gpu-triage/go.sh triage --gpu 0000:03:00.0 --preflight-only'
         ''
         'Reports are written to gpu-triage/reports on this stick.'
         ''
@@ -614,6 +630,32 @@ function Write-BootTxt {
         'than installing a driver stack built for another kernel.'
     )
     $path = Join-Path "$DriveLetter\" 'BOOT.txt'
+    Set-Content -LiteralPath $path -Value $lines -Encoding ASCII
+    return $path
+}
+
+function Write-SafeBootTxt {
+    param([string]$DriveLetter)
+    $lines = @(
+        'gpu-triage - SAFE BOOT IS REQUIRED BEFORE PREFLIGHT'
+        '==================================================='
+        ''
+        'Edit the Arch ISO kernel command line in the Ventoy boot menu.'
+        ''
+        'AMD DUT, Intel/NVIDIA display GPU:'
+        '  module_blacklist=amdgpu,radeon'
+        ''
+        'NVIDIA DUT, Intel/AMD display GPU:'
+        '  module_blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'
+        ''
+        'Do not use the global blacklist when the display GPU has the same vendor'
+        'as the DUT. That setup remains BLOCKED: SAFE_BOOT_NOT_PROVEN until the'
+        'BDF-specific initramfs guard has passed real-hardware validation.'
+        ''
+        'A command typed after boot cannot prevent a hard lock during udev coldplug.'
+        'See gpu-triage/docs/SAFE-BOOT.md for the exact procedure and limitations.'
+    )
+    $path = Join-Path "$DriveLetter\" 'SAFE-BOOT.txt'
     Set-Content -LiteralPath $path -Value $lines -Encoding ASCII
     return $path
 }
@@ -690,10 +732,25 @@ function Invoke-Check {
     }
 
     # --- BOOT.txt
-    if (Test-Path -LiteralPath (Join-Path "$DriveLetter\" 'BOOT.txt')) {
-        Add-Finding OK 'BOOT.txt present on the stick root'
+    $bootPath = Join-Path "$DriveLetter\" 'BOOT.txt'
+    if (Test-Path -LiteralPath $bootPath) {
+        $bootContent = Get-Content -LiteralPath $bootPath -Raw
+        $mapperAt = $bootContent.IndexOf('/dev/mapper/${d##*/}')
+        $rawAt = $bootContent.IndexOf('mount "$d"')
+        if ($mapperAt -ge 0 -and $rawAt -gt $mapperAt -and $bootContent.Contains('readlink -f /dev/disk/by-label/Ventoy')) {
+            Add-Finding OK 'BOOT.txt contains the mapper-first mount path'
+        } else {
+            Add-Finding FAIL 'BOOT.txt exists but does not try the label-derived mapper node before the raw partition'
+        }
     } else {
         Add-Finding WARN 'BOOT.txt missing - run prepare-usb.ps1 without -Check to write it'
+    }
+    $safeBootPath = Join-Path "$DriveLetter\" 'SAFE-BOOT.txt'
+    if ((Test-Path -LiteralPath $safeBootPath) -and
+        (Get-Content -LiteralPath $safeBootPath -Raw).Contains('module_blacklist=amdgpu,radeon')) {
+        Add-Finding OK 'SAFE-BOOT.txt contains the AMD safe-boot profile'
+    } else {
+        Add-Finding FAIL 'SAFE-BOOT.txt missing or incomplete'
     }
 }
 
@@ -962,6 +1019,8 @@ Write-Step 'Mirroring the repository onto the stick'
 # a run that reports it as missing and then creates it reads like a failure.
 $bootTxt = Write-BootTxt -DriveLetter $targetDrive -Release $release
 Write-Info "Boot instructions written: $bootTxt"
+$safeBootTxt = Write-SafeBootTxt -DriveLetter $targetDrive
+Write-Info "Safe-boot instructions written: $safeBootTxt"
 
 # --- 7. verify what actually arrived --------------------------------------
 Write-Step 'Verifying the stick'
@@ -983,7 +1042,7 @@ if ($failed.Count -gt 0) {
 Write-Host 'USB stick ready.' -ForegroundColor Green
 Write-Host ''
 Write-Host "Boot it, pick $($release.iso_name) in the Ventoy menu, then type:"
-Write-Host '  m=/mnt/v; mkdir -p $m; mount /dev/disk/by-label/Ventoy $m; bash $m/gpu-triage/go.sh list' -ForegroundColor White
+Write-Host '  d=$(readlink -f /dev/disk/by-label/Ventoy); m=/mnt/v; mkdir -p $m; mount /dev/mapper/${d##*/} $m || mount "$d" $m; bash $m/gpu-triage/go.sh list' -ForegroundColor White
 Write-Host ''
 Write-Info "The same line is in BOOT.txt on the stick root."
 Write-Info "Download cache: $CacheDir (safe to delete, costs a re-download)"

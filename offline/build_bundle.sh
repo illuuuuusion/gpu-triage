@@ -34,8 +34,12 @@ PKG_DIR="$REPO_ROOT/offline/packages"
 DL_CACHE="$REPO_ROOT/offline/.dlcache"
 DIST_DIR="$REPO_ROOT/offline/dist"
 LIST_FILE="$REPO_ROOT/offline/package-list.txt"
+SAFE_LIST_FILE="$REPO_ROOT/offline/package-list-safe.txt"
+DRIVER_LIST_FILE="$REPO_ROOT/offline/package-list-driver-bound.txt"
 MANIFEST="$REPO_ROOT/offline/manifest.env"
 EXCLUDED="$REPO_ROOT/offline/excluded.txt"
+PROFILES_DIR="$REPO_ROOT/offline/profiles"
+PROFILE_SUMS="$REPO_ROOT/offline/PROFILE-SHA256SUMS"
 
 ISO_PATH=""
 ISO_SUBTRACT=1
@@ -68,6 +72,8 @@ done
 [[ -n "$ISO_PATH" ]] || die "Usage: $0 [options] /path/to/archlinux-YYYY.MM.DD-x86_64.iso"
 [[ -f "$ISO_PATH" ]] || die "ISO not found: $ISO_PATH"
 [[ -f "$LIST_FILE" ]] || die "Package list missing: $LIST_FILE"
+[[ -f "$SAFE_LIST_FILE" ]] || die "Safe runtime package list missing: $SAFE_LIST_FILE"
+[[ -f "$DRIVER_LIST_FILE" ]] || die "Driver-bound runtime package list missing: $DRIVER_LIST_FILE"
 
 ISO_NAME="$(basename "$ISO_PATH")"
 if [[ "$ISO_NAME" =~ archlinux-([0-9]{4})\.([0-9]{2})\.([0-9]{2})-x86_64\.iso$ ]]; then
@@ -90,7 +96,11 @@ command -v pacman >/dev/null 2>&1 || die "Run this on Arch Linux (or in an archl
 command -v bsdtar >/dev/null 2>&1 || die "bsdtar is required (package: libarchive)."
 
 mapfile -t TARGETS < <(grep -Ev '^\s*(#|$)' "$LIST_FILE")
+mapfile -t SAFE_TARGETS < <(grep -Ev '^\s*(#|$)' "$SAFE_LIST_FILE")
+mapfile -t DRIVER_TARGETS < <(grep -Ev '^\s*(#|$)' "$DRIVER_LIST_FILE")
 [[ ${#TARGETS[@]} -gt 0 ]] || die "Package list is empty"
+[[ ${#SAFE_TARGETS[@]} -gt 0 ]] || die "Safe runtime package list is empty"
+[[ ${#DRIVER_TARGETS[@]} -gt 0 ]] || die "Driver-bound runtime package list is empty"
 
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
@@ -139,6 +149,15 @@ if ! pac -Sp --print-format '%r %n %v %l' --noconfirm "${ALL_TARGETS[@]}" > "$TM
   die "Dependency resolution failed against snapshot $ARCHISO_DATE."
 fi
 [[ -s "$TMP/closure.txt" ]] || die "Dependency resolution produced an empty closure."
+
+# Resolve each role independently.  These files later select exact, already
+# hash-covered archives; safe triage therefore never installs a GPU driver.
+if ! pac -Sp --print-format '%r %n %v %l' --noconfirm "${SAFE_TARGETS[@]}" > "$TMP/safe-closure.txt"; then
+  die "Safe-runtime dependency resolution failed against snapshot $ARCHISO_DATE."
+fi
+if ! pac -Sp --print-format '%r %n %v %l' --noconfirm "${DRIVER_TARGETS[@]}" > "$TMP/driver-closure.txt"; then
+  die "Driver-bound-runtime dependency resolution failed against snapshot $ARCHISO_DATE."
+fi
 CLOSURE_COUNT="$(wc -l < "$TMP/closure.txt")"
 log "Closure: $CLOSURE_COUNT packages."
 
@@ -204,6 +223,12 @@ EXCLUDED_COUNT="$BUNDLE_EXCLUDED_COUNT"
 KEEP_COUNT="$BUNDLE_KEEP_COUNT"
 [[ $KEEP_COUNT -gt 0 ]] || die "Nothing left to ship after subtracting the ISO packages."
 
+mkdir -p "$PROFILES_DIR"
+bundle_split_closure "$TMP/safe-closure.txt" ISO_PKGS "$ISO_SUBTRACT" "$TMP/safe-keep.txt" "$TMP/safe-excluded.txt"
+awk -F '\t' 'NF >= 4 { print "packages/" $4 }' "$TMP/safe-keep.txt" | sed 's/:/_/g' | sort -u > "$PROFILES_DIR/safe-runtime.files"
+bundle_split_closure "$TMP/driver-closure.txt" ISO_PKGS "$ISO_SUBTRACT" "$TMP/driver-keep.txt" "$TMP/driver-excluded.txt"
+awk -F '\t' 'NF >= 4 { print "packages/" $4 }' "$TMP/driver-keep.txt" | sed 's/:/_/g' | sort -u > "$PROFILES_DIR/driver-bound-runtime.files"
+
 # --- assemble the bundle --------------------------------------------------
 log "Copying $KEEP_COUNT package(s) to $PKG_DIR..."
 declare -A SEEN_FILES=()
@@ -245,6 +270,7 @@ MANIFEST
 (
   cd "$REPO_ROOT/offline"
   find packages -maxdepth 1 -type f -name '*.pkg.tar.zst' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+  sha256sum manifest.env profiles/safe-runtime.files profiles/driver-bound-runtime.files > PROFILE-SHA256SUMS
 )
 
 BUNDLE_SIZE="$(du -sh "$PKG_DIR" | awk '{print $1}')"
@@ -259,7 +285,7 @@ if [[ $WRITE_DIST -eq 1 ]]; then
   (
     cd "$REPO_ROOT/offline"
     bsdtar --format zip --options zip:compression=store \
-           -cf "$DIST_DIR/$ZIP_NAME" packages manifest.env SHA256SUMS excluded.txt
+           -cf "$DIST_DIR/$ZIP_NAME" packages profiles manifest.env SHA256SUMS PROFILE-SHA256SUMS excluded.txt
   )
   (
     cd "$DIST_DIR"
@@ -274,7 +300,7 @@ if [[ -z "$OWNER" && -n "${SUDO_UID:-}" ]]; then
 fi
 if [[ -n "$OWNER" ]]; then
   chown -R "$OWNER" "$PKG_DIR" "$DL_CACHE" "$MANIFEST" "$EXCLUDED" \
-        "$REPO_ROOT/offline/SHA256SUMS" 2>/dev/null || true
+        "$REPO_ROOT/offline/SHA256SUMS" "$PROFILE_SUMS" "$PROFILES_DIR" 2>/dev/null || true
   [[ -d "$DIST_DIR" ]] && chown -R "$OWNER" "$DIST_DIR" 2>/dev/null || true
 fi
 

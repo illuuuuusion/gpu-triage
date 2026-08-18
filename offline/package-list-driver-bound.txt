@@ -1,0 +1,8 @@
+# Future driver-bound stages; not selected by safe triage.
+python
+pciutils
+vulkan-tools
+vulkan-radeon
+nvidia-open
+nvidia-utils
+memtest_vulkan

@@ -5,6 +5,21 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_DIR="$REPO_ROOT/offline/packages"
 MANIFEST="$REPO_ROOT/offline/manifest.env"
 SUMS="$REPO_ROOT/offline/SHA256SUMS"
+PROFILE_SUMS="$REPO_ROOT/offline/PROFILE-SHA256SUMS"
+
+PROFILE="safe-runtime"
+if [[ "${1:-}" == "--profile" ]]; then
+  [[ $# -eq 2 ]] || { echo "Usage: $0 [--profile safe-runtime|driver-bound-runtime]" >&2; exit 2; }
+  PROFILE="$2"
+elif [[ $# -ne 0 ]]; then
+  echo "Usage: $0 [--profile safe-runtime|driver-bound-runtime]" >&2
+  exit 2
+fi
+case "$PROFILE" in
+  safe-runtime | driver-bound-runtime) ;;
+  *) echo "Unknown runtime profile: $PROFILE" >&2; exit 2 ;;
+esac
+PROFILE_FILE="$REPO_ROOT/offline/profiles/$PROFILE.files"
 
 # /run is tmpfs, so the stamp lives for exactly one live boot and is never
 # written back to the USB stick.
@@ -22,6 +37,9 @@ bundle_id() {
     printf 'root=%s\n' "$REPO_ROOT"
     if [[ -f "$MANIFEST" ]]; then sha256sum < "$MANIFEST"; else printf 'no-manifest\n'; fi
     if [[ -f "$SUMS" ]]; then sha256sum < "$SUMS"; else printf 'no-sums\n'; fi
+    if [[ -n "${PROFILE_SUMS:-}" && -f "$PROFILE_SUMS" ]]; then sha256sum < "$PROFILE_SUMS"; else printf 'no-profile-sums\n'; fi
+    printf 'profile=%s\n' "${PROFILE:-safe-runtime}"
+    if [[ -n "${PROFILE_FILE:-}" && -f "$PROFILE_FILE" ]]; then sha256sum < "$PROFILE_FILE"; else printf 'no-profile\n'; fi
   } | sha256sum | awk '{print $1}'
 }
 
@@ -32,8 +50,11 @@ fi
 
 [[ -f /etc/arch-release ]] || die "This MVP expects the official Arch Linux live environment."
 [[ -d "$PKG_DIR" ]] || die "Offline package directory missing: $PKG_DIR"
-mapfile -t PACKAGE_FILES < <(find "$PKG_DIR" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print | sort)
-[[ ${#PACKAGE_FILES[@]} -gt 0 ]] || die "Offline bundle is empty. Build it on the Internet-connected PC first."
+[[ -f "$SUMS" ]] || die "SHA256SUMS missing; refusing an unverified offline installation."
+[[ -f "$PROFILE_SUMS" ]] || die "PROFILE-SHA256SUMS missing; runtime role selection is not authenticated."
+[[ -f "$PROFILE_FILE" ]] || die "Runtime profile missing: $PROFILE_FILE. Rebuild the Phase-1 bundle."
+mapfile -t DISCOVERED_FILES < <(find "$PKG_DIR" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print | sort)
+[[ ${#DISCOVERED_FILES[@]} -gt 0 ]] || die "Offline bundle is empty. Build it on the Internet-connected PC first."
 
 BUNDLE_ID="$(bundle_id)"
 if [[ "${GPU_TRIAGE_FORCE_BOOTSTRAP:-0}" != "1" && -f "$STAMP" && "$(cat "$STAMP" 2>/dev/null)" == "$BUNDLE_ID" ]]; then
@@ -46,9 +67,18 @@ EXPECTED_KERNEL=""
 ARCHISO_DATE=""
 BUNDLE_CREATED=""
 if [[ -f "$MANIFEST" ]]; then
-  # Generated only by our own build script; shell-format values are quoted.
-  # shellcheck disable=SC1090
-  source "$MANIFEST"
+  # Parse the small allowlist as data.  A removable medium must never gain shell
+  # execution merely because a manifest line was modified.
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^(EXPECTED_KERNEL|ARCHISO_DATE|BUNDLE_CREATED|ISO_SUBTRACT)=\'(.*)\'$ ]]; then
+      case "${BASH_REMATCH[1]}" in
+        EXPECTED_KERNEL) EXPECTED_KERNEL="${BASH_REMATCH[2]}" ;;
+        ARCHISO_DATE) ARCHISO_DATE="${BASH_REMATCH[2]}" ;;
+        BUNDLE_CREATED) BUNDLE_CREATED="${BASH_REMATCH[2]}" ;;
+        ISO_SUBTRACT) ISO_SUBTRACT="${BASH_REMATCH[2]}" ;;
+      esac
+    fi
+  done < "$MANIFEST"
 fi
 
 RUNNING_KERNEL="$(uname -r)"
@@ -65,28 +95,37 @@ MSG
   exit 3
 fi
 
-if [[ -f "$SUMS" ]]; then
-  log "Verifying offline bundle hashes..."
-  (cd "$REPO_ROOT/offline" && sha256sum -c SHA256SUMS --quiet) || die "Offline package checksum verification failed."
+log "Verifying offline bundle and runtime-profile hashes..."
+(cd "$REPO_ROOT/offline" && sha256sum -c SHA256SUMS --quiet) || die "Offline package checksum verification failed."
+(cd "$REPO_ROOT/offline" && sha256sum -c PROFILE-SHA256SUMS --quiet) || die "Runtime profile checksum verification failed."
 
-  # Install exactly what was hashed. A package file sitting in the directory but
-  # absent from SHA256SUMS was never verified and must not enter the transaction.
-  DISCOVERED=${#PACKAGE_FILES[@]}
-  mapfile -t PACKAGE_FILES < <(
-    awk -v dir="$REPO_ROOT/offline" 'NF >= 2 { sub(/^\*/, "", $2); print dir "/" $2 }' "$SUMS" | sort
-  )
-  [[ ${#PACKAGE_FILES[@]} -gt 0 ]] || die "SHA256SUMS lists no packages."
-  if [[ ${#PACKAGE_FILES[@]} -lt $DISCOVERED ]]; then
-    log "Ignoring $((DISCOVERED - ${#PACKAGE_FILES[@]})) package file(s) not covered by SHA256SUMS."
-  fi
+declare -A HASHED=()
+while read -r _ relative; do
+  relative="${relative#\*}"
+  [[ "$relative" == packages/*.pkg.tar.zst ]] || die "Invalid package path in SHA256SUMS: $relative"
+  HASHED["$relative"]=1
+done < "$SUMS"
+
+PACKAGE_FILES=()
+while IFS= read -r relative; do
+  [[ -n "$relative" && "$relative" != \#* ]] || continue
+  [[ "$relative" == packages/*.pkg.tar.zst && "$relative" != *..* ]] \
+    || die "Invalid path in $PROFILE_FILE: $relative"
+  [[ -n "${HASHED[$relative]:-}" ]] || die "Profile package is not covered by SHA256SUMS: $relative"
+  [[ -f "$REPO_ROOT/offline/$relative" ]] || die "Profile package is missing: $relative"
+  PACKAGE_FILES+=("$REPO_ROOT/offline/$relative")
+done < "$PROFILE_FILE"
+
+if [[ ${#PACKAGE_FILES[@]} -eq 0 ]]; then
+  log "Profile $PROFILE is already fully provided by the pinned Arch ISO; no package install is needed."
 else
-  log "No SHA256SUMS present; installing unverified package files from $PKG_DIR."
+  log "Profile $PROFILE selects ${#PACKAGE_FILES[@]} verified package file(s)."
 fi
 
 log "Installing required runtime packages from USB only..."
 # --needed avoids rewriting packages that already exist at the identical version
 # in the live ISO.
-if ! pacman -U --needed --noconfirm "${PACKAGE_FILES[@]}"; then
+if [[ ${#PACKAGE_FILES[@]} -gt 0 ]] && ! pacman -U --needed --noconfirm "${PACKAGE_FILES[@]}"; then
   if [[ "${ISO_SUBTRACT:-0}" == "1" ]]; then
     die "Installation failed.
 This bundle ships only what the Arch ISO of ${ARCHISO_DATE:-its build date} does not
@@ -97,36 +136,9 @@ build_bundle.sh --no-iso-subtract for a self-contained bundle."
   die "Installation of the offline packages failed."
 fi
 
-log "Refreshing module dependency metadata..."
-depmod -a "$RUNNING_KERNEL" || true
-
-# AMD is normally already bound automatically. Loading is harmless if no AMD dGPU exists.
-modprobe amdgpu 2>/dev/null || true
-
-# The official ISO may have bound nouveau before the NVIDIA package was installed.
-# Because the diagnostic display is expected to run from an iGPU, detach only
-# non-boot NVIDIA display devices from nouveau before loading NVIDIA's module.
-for dev in /sys/bus/pci/devices/*; do
-  [[ -r "$dev/vendor" && -r "$dev/class" ]] || continue
-  [[ "$(<"$dev/vendor")" == "0x10de" ]] || continue
-  cls="$(<"$dev/class")"
-  [[ "$cls" == 0x03* ]] || continue
-  [[ -r "$dev/boot_vga" && "$(<"$dev/boot_vga")" == "1" ]] && continue
-  if [[ -L "$dev/driver" && "$(basename "$(readlink -f "$dev/driver")")" == "nouveau" ]]; then
-    bdf="$(basename "$dev")"
-    log "Detaching test GPU $bdf from nouveau..."
-    printf '%s' "$bdf" > /sys/bus/pci/drivers/nouveau/unbind || true
-  fi
-done
-
-modprobe -r nouveau 2>/dev/null || true
-modprobe nvidia 2>/dev/null || true
-modprobe nvidia_uvm 2>/dev/null || true
-modprobe nvidia_drm 2>/dev/null || true
-
 mkdir -p "$STAMP_DIR"
 printf '%s' "$BUNDLE_ID" > "$STAMP"
 
-log "Runtime ready."
+log "Runtime profile $PROFILE ready. No GPU module or binding action was performed."
 log "Kernel: $RUNNING_KERNEL"
 log "Bundle: ${BUNDLE_CREATED:-unknown build time}"
