@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from asic_inference import infer_channel_lane, unknown_inference
 from collectors import ReadOnlyCollector, SUPPORTED_VENDORS, positive_counter_paths
 from driver_probe import (
     DriverBoundCollector,
@@ -333,6 +334,9 @@ def run_pre_driver_triage(
             "gpu_local_copy": MatrixEntry(Status.NOT_RUN, "no driver-bound copy workload"),
             "vram_correctness": MatrixEntry(Status.NOT_RUN, "no safely initialized exact-mapped Vulkan device tested"),
             "compute": MatrixEntry(Status.NOT_RUN, "not part of safe preflight"),
+            "asic_channel_lane": MatrixEntry(
+                Status.UNKNOWN, "Channel/Lane: UNKNOWN (no validated ASIC inference was applied)"
+            ),
             "physical_vram_package": MatrixEntry(Status.UNKNOWN, "no validated ASIC/board mapping"),
         }
         report.measurements = {
@@ -351,6 +355,7 @@ def run_pre_driver_triage(
                 name: {"cmd": value.get("cmd"), "rc": value.get("rc")}
                 for name, value in pci.items()
             },
+            "asic_inference": unknown_inference("NO_DRIVER_BOUND_ERROR_EVIDENCE"),
         }
         report.observations = observations
         report.interpretation = [
@@ -495,6 +500,41 @@ def run_pre_driver_triage(
                     "message": "The Vulkan helper reported VK_ERROR_DEVICE_LOST; component attribution is inconclusive.",
                 })
 
+        asic_inference = infer_channel_lane(
+            repo_root / "data/asics/profiles",
+            vendor_id=target.vendor_id,
+            device_id=target.device_id,
+            revision=target.revision,
+            evidence=vram,
+        )
+        report.measurements["asic_inference"] = asic_inference
+        if asic_inference["status"] == "HYPOTHESIS":
+            report.matrix["asic_channel_lane"] = MatrixEntry(
+                Status.WARN,
+                (
+                    f"hypothesis channel={asic_inference['channel']}; lane={asic_inference['lane']}; "
+                    f"mapping {asic_inference['mapping_profile']['id']}@{asic_inference['mapping_version']}; "
+                    f"confidence {asic_inference['confidence']}"
+                ),
+            )
+            report.observations.append({
+                "level": "WARN",
+                "message": (
+                    f"A validated ASIC profile maps recorded logical errors to channel "
+                    f"{asic_inference['channel']} / lane {asic_inference['lane']} as a hypothesis only."
+                ),
+            })
+        else:
+            report.matrix["asic_channel_lane"] = MatrixEntry(
+                Status.UNKNOWN,
+                f"Channel/Lane: UNKNOWN ({asic_inference['reason']})",
+            )
+            if asic_inference["reason"] == "INVALID_ASIC_PROFILE_CATALOG":
+                report.observations.append({
+                    "level": "WARN",
+                    "message": "ASIC profile catalog validation failed; Channel/Lane remains UNKNOWN.",
+                })
+
         telemetry_after = driver_collector.telemetry(target)
         aer_after = collector.aer(bdf)
         aer_delta = aer_counter_delta(aer, aer_after)
@@ -590,6 +630,11 @@ def run_pre_driver_triage(
                 "Host transfer, GPU-local copy, compute KAT and VRAM patterns were classified independently."
                 if helper_completed else
                 "No native Phase-4 workload completed with a safely attributable result."
+            ),
+            (
+                "Channel/lane names are profile-bound hypotheses and do not identify a physical memory package."
+                if asic_inference["status"] == "HYPOTHESIS" else
+                "Channel/Lane remains UNKNOWN because no validated, uniquely matching profile could map this evidence."
             ),
             "Physical VRAM package remains UNKNOWN.",
         ]

@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gpu-triage.invalid/schemas/asic-channel-lane-profile-v1.json",
+  "title": "gpu-triage ASIC channel/lane profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "profile_id", "mapping_version", "confidence", "asic",
+    "input", "sources", "mapping", "known_fault_validation"
+  ],
+  "properties": {
+    "schema": {"const": 1},
+    "profile_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,63}$"},
+    "mapping_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "confidence": {"enum": ["LOW", "MEDIUM", "HIGH"]},
+    "asic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vendor_id", "device_id", "revision_ids"],
+      "properties": {
+        "vendor_id": {"type": "string", "pattern": "^0x[0-9a-fA-F]{4}$"},
+        "device_id": {"type": "string", "pattern": "^0x[0-9a-fA-F]{4}$"},
+        "revision_ids": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^0x[0-9a-fA-F]{2}$"}
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "address_space", "offset_unit_bytes", "word_width_bits", "definition",
+        "helper_schema", "helper_version", "pattern_version", "experiments"
+      ],
+      "properties": {
+        "address_space": {"enum": ["allocation_relative", "virtual", "physical"]},
+        "offset_unit_bytes": {"type": "integer", "minimum": 1},
+        "word_width_bits": {"type": "integer", "minimum": 1, "maximum": 64},
+        "definition": {"type": "string", "minLength": 1},
+        "helper_schema": {"type": "integer", "minimum": 1},
+        "helper_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "pattern_version": {"type": "integer", "minimum": 1},
+        "experiments": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {
+            "enum": ["host_transfer", "gpu_local_copy", "compute_kat", "vram_pattern"]
+          }
+        }
+      }
+    },
+    "sources": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "kind", "title", "locator"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["primary_source", "documented_experiment"]},
+          "title": {"type": "string", "minLength": 1},
+          "locator": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "mapping": {
+      "type": "object", "additionalProperties": false,
+      "required": ["channel", "lane"],
+      "properties": {
+        "channel": {"$ref": "#/$defs/channelRule"},
+        "lane": {"$ref": "#/$defs/laneRule"}
+      }
+    },
+    "known_fault_validation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_ids", "cases"],
+      "properties": {
+        "source_ids": {"$ref": "#/$defs/sourceIds"},
+        "cases": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": [
+              "id", "source_ids", "experiment", "offset", "xor_bits",
+              "expected_channels", "expected_lanes"
+            ],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "source_ids": {"$ref": "#/$defs/sourceIds"},
+              "experiment": {
+                "enum": ["host_transfer", "gpu_local_copy", "compute_kat", "vram_pattern"]
+              },
+              "offset": {"type": "integer", "minimum": 0},
+              "xor_bits": {
+                "type": "array", "minItems": 1, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": 0, "maximum": 63}
+              },
+              "expected_channels": {"$ref": "#/$defs/labels"},
+              "expected_lanes": {"$ref": "#/$defs/labels"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sourceIds": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "labels": {
+      "type": "array", "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "channelRule": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "source_ids", "bit_groups", "values"],
+      "properties": {
+        "source": {"const": "input_offset"},
+        "source_ids": {"$ref": "#/$defs/sourceIds"},
+        "bit_groups": {
+          "type": "array", "minItems": 1, "maxItems": 6,
+          "items": {
+            "type": "array", "minItems": 1, "uniqueItems": true,
+            "items": {"type": "integer", "minimum": 0, "maximum": 63}
+          }
+        },
+        "values": {
+          "type": "object",
+          "propertyNames": {"pattern": "^(0|[1-9][0-9]*)$"},
+          "additionalProperties": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "laneRule": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "source_ids", "values"],
+      "properties": {
+        "source": {"const": "xor_bit_index"},
+        "source_ids": {"$ref": "#/$defs/sourceIds"},
+        "values": {
+          "type": "object",
+          "propertyNames": {"pattern": "^(0|[1-9][0-9]*)$"},
+          "additionalProperties": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

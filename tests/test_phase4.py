@@ -24,15 +24,16 @@ def helper_stream(*, statuses=None, errors=None, device_lost=False) -> str:
     }
     errors = errors or []
     events = [
-        {"type": "meta", "schema": 1, "helper": "gpu-triage-vram-helper",
-         "version": "1.0.0", "pattern_version": 1, "prng": "hash32-v1"},
+        {"type": "meta", "schema": 2, "helper": "gpu-triage-vram-helper",
+         "version": "1.1.0", "pattern_version": 1, "prng": "hash32-v1",
+         "offset_space": "allocation_relative", "offset_unit_bytes": 1},
         {"type": "identity", "exact_match": True, "bdf": "0000:03:00.0",
          "vendor_id": 0x1002, "device_id": 0x73AF,
          "mapping_source": "VK_EXT_pci_bus_info", "name": "Fixture"},
     ]
     for error in errors:
         events.append({
-            "type": "error", "allocation": 2, "offset": 1048576,
+            "type": "error", "experiment": "vram_pattern", "allocation": 2, "offset": 1048576,
             "width_bits": 32, "expected": "0xaaaaaaaa", "actual": "0xaaa8aaaa",
             "xor": "0x00020000", "bits_0_to_1": [], "bits_1_to_0": [17],
             "pattern": "alternating_aa", "seed": 1234, "pass": 3,

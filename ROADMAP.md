@@ -49,9 +49,38 @@ AER-Fixtures hardwarefrei getestet. Die im Plan verlangten Known-good-
 Gegenproben auf echter AMD- und NVIDIA-Hardware sind noch nicht dokumentiert;
 dies ist daher weiterhin keine allgemeine Hardwarefreigabe.
 
-## Phase 4+ — siehe PLAN-SAFE-TRIAGE.md
+## Phase 4 — eigener VRAM-/Compute-Helper (implementiert, Hardwarevalidierung offen)
 
-ROM-Opt-in und der eigene VRAM-/Compute-Helper folgen in den dort definierten
+- nativer C17-/Vulkan-Helper mit eigener vollständiger BDF- und PCI-ID-Prüfung
+- getrennte Experimente für Host-Transfer, GPU-local Copy, Compute-KAT und VRAM-Pattern
+- strukturierte, begrenzte Fehlerwörter mit Offset, expected/actual/XOR,
+  Richtungsbits, Pattern, Seed, Pass, Allocation und Reread
+- deterministische Patternfamilien, Fehler-Injection und Aggregationen für
+  Cluster, Stride und Wiederholbarkeit
+- Zeit-, Speicher-, Record-, VRAM-Anteil- und Temperaturgrenzen
+
+Die Protokoll- und Analysepfade sind hardwarefrei getestet. Known-good-Läufe
+auf echter AMD- und NVIDIA-Hardware stehen noch aus.
+
+## Phase 5 — ASIC Channel/Lane inference (implementiert, Katalog leer)
+
+- versioniertes Schema unter `data/asics/schema-v1.json`
+- exakte Vendor-/Device-/Revision-Zuordnung und deklarierte Adresssemantik
+- Primärquelle oder dokumentiertes Experiment für jede Mappingregel
+- Known-Fault-Fixtures mit eigener Quelle werden bei jedem Laden ausgeführt
+- ungültige, fehlende, semantisch unpassende oder mehrdeutige Profile ergeben
+  fail-closed `Channel/Lane: UNKNOWN`
+- Report nennt Profil, Mapping-Version, Mapping- und Evidenz-Confidence
+- Channel/Lane bleibt ausdrücklich eine Hypothese und nennt nie ein Package
+
+Der Produktionskatalog ist absichtlich leer: Für die erkannten ASICs liegt
+noch kein öffentlich belegtes und mit Known-Fault-Gegenproben validiertes
+Mapping vor. Die Implementierung erfüllt damit die Sicherheitsanforderung,
+ohne für Navi 21 oder andere ASICs spekulative Namen auszugeben.
+
+## Phase 6+ — siehe PLAN-SAFE-TRIAGE.md
+
+ROM-Opt-in und Board-zu-Package-Zuordnung folgen in den dort definierten
 Phasen. Die älteren Versionsziele unten bleiben historische Produktideen, sind
 aber nicht der aktuelle Sicherheitsplan.
 

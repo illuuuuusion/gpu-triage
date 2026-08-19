@@ -17,7 +17,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define HELPER_VERSION "1.0.0"
+#define HELPER_VERSION "1.1.0"
 #define ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
 
 typedef struct {
@@ -75,8 +75,9 @@ static uint64_t monotonic_ms(void) {
 }
 
 static void emit_meta(const options *o) {
-    printf("{\"type\":\"meta\",\"schema\":1,\"helper\":\"gpu-triage-vram-helper\","
+    printf("{\"type\":\"meta\",\"schema\":2,\"helper\":\"gpu-triage-vram-helper\","
            "\"version\":\"%s\",\"pattern_version\":%u,\"prng\":\"hash32-v1\","
+           "\"offset_space\":\"allocation_relative\",\"offset_unit_bytes\":1,"
            "\"requested\":{\"seconds\":%" PRIu64 ",\"bytes\":%" PRIu64
            ",\"max_error_records\":%" PRIu64 ",\"max_vram_percent\":%u}}\n",
            HELPER_VERSION, GT_PATTERN_VERSION, o->seconds, o->max_bytes,
@@ -111,17 +112,18 @@ static void bit_array(uint32_t value) {
 }
 
 static void emit_error(gt_error_summary *summary, const options *o,
-                       uint32_t allocation, uint64_t offset, uint32_t expected,
+                       const char *experiment_name, uint32_t allocation,
+                       uint64_t offset, uint32_t expected,
                        uint32_t actual, const char *pattern, uint32_t seed,
                        uint32_t pass, uint32_t reread, int64_t temp_mc) {
     uint32_t up = (~expected) & actual, down = expected & (~actual);
     gt_summary_add(summary, offset, expected, actual, allocation, pass, reread);
     if (summary->recorded >= o->max_errors) return;
     summary->recorded++;
-    printf("{\"type\":\"error\",\"allocation\":%u,\"offset\":%" PRIu64
+    printf("{\"type\":\"error\",\"experiment\":\"%s\",\"allocation\":%u,\"offset\":%" PRIu64
            ",\"width_bits\":32,\"expected\":\"0x%08" PRIx32
            "\",\"actual\":\"0x%08" PRIx32 "\",\"xor\":\"0x%08" PRIx32
-           "\",\"bits_0_to_1\":", allocation, offset, expected, actual,
+           "\",\"bits_0_to_1\":", experiment_name, allocation, offset, expected, actual,
            expected ^ actual);
     bit_array(up);
     printf(",\"bits_1_to_0\":");
@@ -546,12 +548,13 @@ static int64_t read_temperature(const options *o) {
 
 static void compare_words(const options *o, gt_error_summary *summary, experiment *e,
                           const uint32_t *expected, const uint32_t *actual, size_t words,
-                          uint32_t allocation, const char *pattern, uint32_t seed,
+                          const char *experiment_name, uint32_t allocation,
+                          const char *pattern, uint32_t seed,
                           uint32_t pass, uint32_t reread, int64_t temp) {
     e->comparisons += words;
     for (size_t i = 0; i < words; ++i) if (expected[i] != actual[i]) {
         e->errors++;
-        emit_error(summary, o, allocation, i * 4u, expected[i], actual[i],
+        emit_error(summary, o, experiment_name, allocation, i * 4u, expected[i], actual[i],
                    pattern, seed, pass, reread, temp);
     }
 }
@@ -574,11 +577,11 @@ static int self_test(const options *o) {
         if (memcmp(expected, actual, sizeof(expected))) return 2;
     }
     memcpy(actual, expected, sizeof(actual)); actual[16] ^= 0x00020000u; actual[32] ^= 1u;
-    compare_words(o, &summary, &e[3], expected, actual, ARRAY_LEN(expected), 0,
+    compare_words(o, &summary, &e[3], expected, actual, ARRAY_LEN(expected), "vram_pattern", 0,
                   "deterministic_prng", 1242, 0, 0, -1);
-    compare_words(o, &summary, &e[3], expected, actual, ARRAY_LEN(expected), 0,
+    compare_words(o, &summary, &e[3], expected, actual, ARRAY_LEN(expected), "vram_pattern", 0,
                   "deterministic_prng", 1242, 1, 1, -1);
-    compare_words(o, &summary, &e[3], expected, actual, ARRAY_LEN(expected), 1,
+    compare_words(o, &summary, &e[3], expected, actual, ARRAY_LEN(expected), "vram_pattern", 1,
                   "deterministic_prng", 1242, 2, 0, -1);
     emit_identity(o, true, "VK_EXT_pci_bus_info", "synthetic self-test device");
     for (size_t i = 0; i < 4; ++i) emit_experiment((const char *[]){"host_transfer","gpu_local_copy","compute_kat","vram_pattern"}[i], &e[i]);
@@ -602,13 +605,13 @@ static int run_hardware(const options *o) {
     gt_fill_pattern(input, words, 8, 0x13579bdfu, 1);
     e[0] = (experiment){ .status = "PASS" };
     if (!transfer_roundtrip(&v, false)) e[0].status = "INCONCLUSIVE";
-    else compare_words(o, &summary, &e[0], input, output, words, 0, "host_transfer_prng", 0x13579bdfu, 0, 0, temp);
+    else compare_words(o, &summary, &e[0], input, output, words, "host_transfer", 0, "host_transfer_prng", 0x13579bdfu, 0, 0, temp);
     if (e[0].errors) e[0].status = "FAIL";
     emit_experiment("host_transfer", &e[0]);
 
     e[1] = (experiment){ .status = "PASS" };
     if (!v.device_lost && !transfer_roundtrip(&v, true)) e[1].status = "INCONCLUSIVE";
-    else if (!v.device_lost) compare_words(o, &summary, &e[1], input, output, words, 1, "gpu_local_copy", 0x13579bdfu, 0, 0, temp);
+    else if (!v.device_lost) compare_words(o, &summary, &e[1], input, output, words, "gpu_local_copy", 1, "gpu_local_copy", 0x13579bdfu, 0, 0, temp);
     if (e[1].errors) e[1].status = "FAIL";
     if (v.device_lost) e[1].status = "INCONCLUSIVE";
     emit_experiment("gpu_local_copy", &e[1]);
@@ -617,7 +620,7 @@ static int run_hardware(const options *o) {
     push_params params = { .words = (uint32_t)words, .pattern = 9, .seed = 0x2468ace0u, .stride = 1 };
     gt_fill_pattern(input, words, 9, params.seed, 1);
     if (!v.device_lost && !compute_roundtrip(&v, &v.local_a, &params)) e[2].status = "INCONCLUSIVE";
-    else if (!v.device_lost) compare_words(o, &summary, &e[2], input, output, words, 0, "compute_kat", params.seed, 0, 0, temp);
+    else if (!v.device_lost) compare_words(o, &summary, &e[2], input, output, words, "compute_kat", 0, "compute_kat", params.seed, 0, 0, temp);
     if (e[2].errors) e[2].status = "FAIL";
     if (v.device_lost) e[2].status = "INCONCLUSIVE";
     emit_experiment("compute_kat", &e[2]);
@@ -645,14 +648,14 @@ static int run_hardware(const options *o) {
                 gt_fill_pattern(input, words, pattern, seed, stride);
                 params = (push_params){ .words=(uint32_t)words, .pattern=pattern, .seed=seed, .stride=stride };
                 if (!compute_roundtrip(&v, local, &params)) { e[3].status = "INCONCLUSIVE"; goto patterns_done; }
-                compare_words(o, &summary, &e[3], input, output, words, allocation,
+                compare_words(o, &summary, &e[3], input, output, words, "vram_pattern", allocation,
                               gt_pattern_name(pattern), seed, pass, 0, temp);
                 /* A second transfer-only read verifies persistence without rewriting. */
                 if (!begin(&v)) { e[3].status = "INCONCLUSIVE"; goto patterns_done; }
                 VkBufferCopy copy = { .size = v.bytes };
                 vkCmdCopyBuffer(v.command, local->buffer, v.host_out.buffer, 1, &copy);
                 if (!submit(&v)) { e[3].status = "INCONCLUSIVE"; goto patterns_done; }
-                compare_words(o, &summary, &e[3], input, output, words, allocation,
+                compare_words(o, &summary, &e[3], input, output, words, "vram_pattern", allocation,
                               gt_pattern_name(pattern), seed, pass, 1, temp);
                 pass++;
               }

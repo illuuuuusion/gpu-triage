@@ -17,7 +17,7 @@ from typing import Any, Callable
 from collectors import PciTarget
 
 
-SCHEMA = 1
+SCHEMA = 2
 MAX_JSONL_BYTES = 16 * 1024 * 1024
 EXPERIMENTS = ("host_transfer", "gpu_local_copy", "compute_kat", "vram_pattern")
 VALID_STATUS = {"PASS", "FAIL", "INCONCLUSIVE", "UNAVAILABLE", "BLOCKED"}
@@ -52,6 +52,16 @@ def _integer(value: Any, name: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _hex_word(value: Any, name: str, width_bits: int) -> int:
+    digits = (width_bits + 3) // 4
+    if not isinstance(value, str) or not re.fullmatch(rf"0x[0-9a-fA-F]{{{digits}}}", value):
+        raise HelperProtocolError(f"{name} must be a fixed-width hexadecimal word")
+    number = int(value, 16)
+    if number >= 1 << width_bits:
+        raise HelperProtocolError(f"{name} exceeds width_bits")
+    return number
+
+
 def parse_helper_jsonl(
     text: str,
     *,
@@ -83,6 +93,8 @@ def parse_helper_jsonl(
     meta, identity, summary = metas[0], identities[0], summaries[0]
     if meta.get("schema") != SCHEMA or meta.get("helper") != "gpu-triage-vram-helper":
         raise HelperProtocolError("unsupported helper schema or identity")
+    if meta.get("offset_space") != "allocation_relative" or meta.get("offset_unit_bytes") != 1:
+        raise HelperProtocolError("helper did not declare allocation-relative byte offsets")
     expected_ids = (target.vendor_id, target.device_id)
     actual_ids = (identity.get("vendor_id"), identity.get("device_id"))
     if (
@@ -97,7 +109,7 @@ def parse_helper_jsonl(
     if len(error_events) > max_error_records:
         raise HelperProtocolError("helper exceeded the requested error-record limit")
     required_error = {
-        "allocation", "offset", "width_bits", "expected", "actual", "xor",
+        "experiment", "allocation", "offset", "width_bits", "expected", "actual", "xor",
         "bits_0_to_1", "bits_1_to_0", "pattern", "seed", "pass", "reread",
         "timestamp_ms",
     }
@@ -105,15 +117,32 @@ def parse_helper_jsonl(
         missing = required_error - event.keys()
         if missing:
             raise HelperProtocolError("error record lacks " + ", ".join(sorted(missing)))
+        if event["experiment"] not in EXPERIMENTS:
+            raise HelperProtocolError("error record names an invalid experiment")
         _integer(event["allocation"], "allocation")
         _integer(event["offset"], "offset")
-        _integer(event["width_bits"], "width_bits", minimum=1)
+        width_bits = _integer(event["width_bits"], "width_bits", minimum=1)
+        if width_bits > 64:
+            raise HelperProtocolError("width_bits exceeds the supported 64-bit record width")
         _integer(event["seed"], "seed")
         _integer(event["pass"], "pass")
         _integer(event["reread"], "reread")
         _integer(event["timestamp_ms"], "timestamp_ms")
         if not isinstance(event["bits_0_to_1"], list) or not isinstance(event["bits_1_to_0"], list):
             raise HelperProtocolError("directional bit fields must be arrays")
+        expected = _hex_word(event["expected"], "expected", width_bits)
+        actual = _hex_word(event["actual"], "actual", width_bits)
+        xor = _hex_word(event["xor"], "xor", width_bits)
+        up = [bit for bit in range(width_bits) if ((~expected) & actual) & (1 << bit)]
+        down = [bit for bit in range(width_bits) if (expected & (~actual)) & (1 << bit)]
+        for name in ("bits_0_to_1", "bits_1_to_0"):
+            values = event[name]
+            if any(not isinstance(bit, int) or isinstance(bit, bool) or bit < 0 or bit >= width_bits for bit in values):
+                raise HelperProtocolError(f"{name} contains an invalid bit index")
+            if len(set(values)) != len(values):
+                raise HelperProtocolError(f"{name} contains duplicate bit indices")
+        if xor != expected ^ actual or sorted(event["bits_0_to_1"]) != up or sorted(event["bits_1_to_0"]) != down:
+            raise HelperProtocolError("error record XOR/directional bits are inconsistent")
 
     experiment_events = [item for item in events if item["type"] == "experiment"]
     experiments: dict[str, dict[str, Any]] = {}

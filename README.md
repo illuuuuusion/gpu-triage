@@ -12,14 +12,16 @@
 Offline-Diagnosewerkzeug für dedizierte Grafikkarten. Der sichere Pfad sammelt
 zuerst PCI-Identität, Topologie, Link, BARs, Endpoint-/Upstream-AER, Kernel-,
 DMI-, Treiber-Intent- und pstore-Evidenz. Nur wenn der erwartete Treiber bereits
-gebunden ist, folgen BDF-spezifische Telemetrie, Vulkan-Identität und optional
-ein streng gegateter Legacy-VRAM-Screen. Das Werkzeug lädt, entfernt, bindet
-oder entbindet keinen GPU-Treiber.
+gebunden ist, folgen BDF-spezifische Telemetrie, Vulkan-Identität und der eigene
+streng begrenzte VRAM-/Compute-Helper. ASIC-Channel-/Lane-Namen entstehen nur
+aus einem eindeutig passenden, quellengestützten und Known-Fault-validierten
+Profil; ohne ein solches Profil bleiben sie `UNKNOWN`. Das Werkzeug lädt,
+entfernt, bindet oder entbindet keinen GPU-Treiber.
 
 Der Diagnose-PC benötigt dabei **kein Internet**: Live-System, Anwendung, Pakete
 und Reports liegen gemeinsam auf einem einzigen USB-Stick.
 
-- **Status:** Safe-Triage Phase 3, siehe [ROADMAP.md](ROADMAP.md)
+- **Status:** Safe-Triage Phase 5, siehe [ROADMAP.md](ROADMAP.md)
 - **Erkannt:** AMD-/NVIDIA-PCI-Geräte der Display-/3D-Klasse
 - **Hardwarevalidiert:** noch keine allgemeine Serienfreigabe; Validierungsstand
   und Same-Vendor-Grenze stehen in [docs/SAFE-BOOT.md](docs/SAFE-BOOT.md)
@@ -57,6 +59,8 @@ Der aktuelle Stage-0/1-Lauf erhebt pro Zielkarte:
 | Bereits gebundener NVIDIA-Treiber | `nvidia-smi -i <BDF>` mit Rückprüfung der ausgegebenen vollständigen BDF |
 | Vulkan | exakte Domain/Bus/Device/Function- und PCI-ID-Zuordnung, alternativ eindeutiger DRM-Major/Minor-Pfad |
 | Lastfenster | AER- und Kernel-Deltas; neue NVIDIA-Xid-/AMD-Fehlersignale bleiben BDF-bezogen sichtbar |
+| VRAM/Compute | nativer Helper mit getrenntem Host-Transfer, GPU-Copy, Compute-KAT und VRAM-Pattern; begrenzte strukturierte Fehlerrecords |
+| ASIC-Inferenz | versionierte Profile mit Input-Semantik, Quellen und ausführbaren Known-Fault-Fixtures; leerer Katalog ergibt wörtlich `UNKNOWN` |
 
 
 ## Voraussetzungen
@@ -155,7 +159,7 @@ start.sh list                                        # verfügbare GPUs aufliste
 start.sh doctor --report-dir /mnt/v/gpu-triage/reports # Runtime/Bundle/Reportziel prüfen
 start.sh triage --gpu 0000:03:00.0 --preflight-only  # garantiert nur Stage 0/1
 start.sh triage --gpu 0000:03:00.0 --no-vram         # gebundene Treiberevidenz ohne Speicherlast
-start.sh triage --gpu 0000:03:00.0 --vram-seconds 60 # adaptiv; Legacy-Screen nur nach exaktem Gate
+start.sh triage --gpu 0000:03:00.0 --vram-seconds 60 # adaptiv; nativer Helper nur nach exaktem Gate
 start.sh triage --gpu 0000:03:00.0 --report-dir /mnt/... # anderes Reportziel
 start.sh quick --gpu 0000:03:00.0                    # deprecated, identischer Safe-Pfad
 start.sh --help
@@ -167,13 +171,21 @@ Ein ungebundenes Target endet nach Stage 1. Ein bereits an den erwarteten
 Vendor-Treiber gebundenes Target geht ohne `--preflight-only` adaptiv in Stage 3.
 `--rom` ist fail-closed reserviert und aktiviert noch keinen ROM-Zugriff.
 
-Der Übergangs-Test `memtest_vulkan` kennt selbst nur Bus:Device. Er darf deshalb
-erst starten, wenn `vulkaninfo` genau ein PhysicalDevice anhand vollständiger
-PCI-BDF plus Vendor/Device-ID oder eindeutig über dessen DRM-Knoten zuordnet
-und dieselbe Vulkan-Sicht kein zweites Hardwaregerät enthält. Andernfalls lautet
-das Ergebnis `UNAVAILABLE`/`BLOCKED`; es beginnt keine Allokation. Auch ein
-erfolgreicher Legacy-Screen bleibt `INCOMPLETE`, weil Phase 4 erst Transfer,
-VRAM und Compute unabhängig isoliert.
+Der native Helper ordnet vor jeder Allokation genau ein PhysicalDevice anhand
+der vollständigen PCI-BDF plus Vendor/Device-ID oder eindeutig über dessen
+DRM-Knoten zu. Er meldet Host-Transfer, GPU-local Copy, Compute-KAT und
+VRAM-Pattern getrennt. Fehlerwörter enthalten allokationsrelative Byte-Offsets,
+XOR und Richtungsbits. Diese Offsets sind keine physischen VRAM-Adressen.
+
+Phase 5 wertet solche Fehler nur mit einem Profil unter `data/asics/profiles/`
+aus. Der Loader verlangt die exakte ASIC-Revision, eine Versionsnummer, eine
+präzise Input-Semantik samt Helper-/Patternversion und Experimentauswahl,
+Quellen pro Regel und Known-Fault-Fixtures, die beim Laden erneut gegen die
+Regeln geprüft werden. Kein Profil, ein ungültiges oder
+mehrdeutiges Profil und abweichende Offset-Semantik führen immer zu
+`Channel/Lane: UNKNOWN`. Der ausgelieferte Produktionskatalog ist absichtlich
+leer, weil bislang kein Mapping die im Plan geforderte Evidenzschwelle erfüllt.
+Synthetische Profile existieren ausschließlich in den hardwarefreien Tests.
 
 ### Bootstrap
 
@@ -226,8 +238,10 @@ Crash- oder Power-Loss-Garantie.
 Stage 1 endet bei ungebundenem Target oder `--preflight-only` absichtlich
 `INCOMPLETE`. Ein ungebundenes Target ohne belegte Blacklist/Quarantäne ergibt
 dagegen einen klaren Driver-Init-`FAIL`. Stage 3/4 bleibt ohne den unabhängigen
-Phase-4-Compute-/Transfer-Helper ebenfalls `INCOMPLETE`, kann aber klare
-Telemetry-, AER-, Kernel- oder Legacy-VRAM-Fehler als `FAIL` festhalten.
+Phase-4-Compute-/Transfer-Helper `INCOMPLETE`, kann aber klare Telemetrie-,
+AER-, Kernel- oder VRAM-Fehler als `FAIL` festhalten. Ein fehlendes ASIC-Profil
+verhindert keinen ansonsten vollständigen Testlauf: Channel/Lane ist
+Wissensattribution und bleibt unabhängig davon `UNKNOWN`.
 
 Die sichere Triage folgt einer festen Kette, in der ein blockierter Zustand ein
 sichtbares Ergebnis ist und keine automatische Reparatur auslöst:
@@ -238,8 +252,8 @@ Reportziel atomar beschreibbar? → BDF exakt? → Display-Risiko ausgeschlossen
 ```
 
 Vor und nach Stage 3/4 werden Kernel und AER erneut aufgenommen. Der Kernel-
-Sidecar enthält beide Zeitfenster; ein gelaufener Legacy-Screen erhält einen
-eigenen begrenzten Log-Sidecar. Neue korrigierbare AER-Zähler ergeben `WARN`,
+Sidecar enthält beide Zeitfenster; ein gelaufener nativer Helper erhält einen
+eigenen begrenzten JSONL-Sidecar. Neue korrigierbare AER-Zähler ergeben `WARN`,
 neue nonfatal/fatal Zähler `FAIL`; Upstream-Werte werden nicht dem Endpoint
 zugeschrieben.
 
@@ -263,6 +277,7 @@ Skripte ist das der wichtige Unterschied.
 | `GPU_TRIAGE_FORCE_BOOTSTRAP` | `1` erzwingt einen vollständigen Bootstrap trotz gültiger Marke |
 | `GPU_TRIAGE_REPORT_DIR` | Zielverzeichnis für Reports (entspricht `--report-dir`) |
 | `GPU_TRIAGE_MEMTEST` | expliziter ausführbarer Pfad zum Legacy-Backend; ein ungültiger Override fällt geschlossen aus |
+| `GPU_TRIAGE_VRAM_HELPER` | expliziter ausführbarer Pfad zum nativen Phase-4-Helper; ein ungültiger Override fällt geschlossen aus |
 
 ## Projektstruktur
 
@@ -276,8 +291,11 @@ gpu-triage/
 │   ├── collectors.py           # ausschließlich read-only Collector
 │   ├── driver_probe.py         # gebundene Telemetrie, Vulkan-Mapping, Deltas
 │   ├── legacy_vram.py          # exakt gegateter memtest_vulkan-Adapter
+│   ├── asic_inference.py       # validierte, fail-closed Channel-/Lane-Hypothesen
 │   ├── triage_model.py         # Status-, Stage- und Resultmodell
 │   └── reporting.py            # kompakte Reports, Checkpoints, Spiegel und Sidecars
+├── data/asics/                 # Schema + absichtlich leerer Produktionsprofilkatalog
+├── vram-helper/                # nativer Vulkan-Helper, Shader und Analysetests
 ├── scripts/
 │   └── bootstrap.sh            # Offline-Runtime installieren, keine Treiberaktion
 ├── offline/
@@ -327,8 +345,9 @@ Runtime-Pakete oder das verwendete Arch-ISO ändern.
 
 ### Tests
 
-Die Regressionstests benötigen keine echte GPU. Sie bauen Fake-sysfs-Bäume in
-temporären Verzeichnissen. Die Shell-Suite prüft zusätzlich Bundle-Subtraktion,
+Die Regressionstests benötigen keine echte GPU. Sie bauen Fake-sysfs-Bäume und
+synthetische, niemals ausgelieferte ASIC-Profile in temporären Verzeichnissen.
+Die Shell-Suite prüft zusätzlich Bundle-Subtraktion,
 `release.json`, Bootstrap-Stamp sowie Mount-/Remount-Routing von `go.sh`:
 
 ```bash

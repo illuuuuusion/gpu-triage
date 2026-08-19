@@ -122,6 +122,8 @@ def markdown_report(report: TriageReport) -> str:
     error_summary = helper.get("error_summary", {})
     helper_limits = helper.get("limits", {})
     reproducible = error_summary.get("reproducible", {})
+    asic = report.measurements.get("asic_inference", {})
+    asic_profile = asic.get("mapping_profile") or {}
     lines = [
         "# GPU-TRIAGE REPORT",
         "",
@@ -162,6 +164,7 @@ def markdown_report(report: TriageReport) -> str:
         "gpu_local_copy": "GPU-local copy",
         "vram_correctness": "VRAM correctness",
         "compute": "Compute",
+        "asic_channel_lane": "ASIC channel / lane",
         "physical_vram_package": "Physical VRAM package",
     }
     if report.matrix:
@@ -192,6 +195,13 @@ def markdown_report(report: TriageReport) -> str:
         f"- Reproducible offsets: reread={_one_line(reproducible.get('reread') if reproducible else 'n/a')}, "
         f"pass={_one_line(reproducible.get('pass') if reproducible else 'n/a')}, "
         f"allocation={_one_line(reproducible.get('allocation') if reproducible else 'n/a')}",
+        f"- ASIC channel/lane: {_one_line(asic.get('channel') or 'UNKNOWN')} / "
+        f"{_one_line(asic.get('lane') or 'UNKNOWN')} ({_one_line(asic.get('status') or 'UNKNOWN')})",
+        f"- ASIC mapping: {_one_line(asic_profile.get('id') or 'not applied')}@"
+        f"{_one_line(asic.get('mapping_version') or 'n/a')}; mapping confidence "
+        f"{_one_line(asic.get('mapping_confidence') or 'n/a')}; evidence confidence "
+        f"{_one_line(asic.get('confidence') or 'n/a')}; sources "
+        f"{_one_line(', '.join(asic_profile.get('source_ids', [])) or 'n/a')}",
         "",
         "## Observations",
         "",
@@ -255,7 +265,8 @@ def markdown_report(report: TriageReport) -> str:
             if driver_bound_ran else
             "- A single AER snapshot cannot distinguish old/latched events from events caused by this run."
         ),
-        "- Allocation offsets cannot identify a physical GDDR package.",
+        "- Allocation-relative offsets require a versioned, sourced, known-fault-validated ASIC profile for channel/lane hypotheses.",
+        "- Channel/lane hypotheses cannot identify a physical GDDR package.",
         "- Physical VRAM package: UNKNOWN",
         "- Runtime-mirror checkpoints are volatile and are not a guarantee across power loss.",
         "",
