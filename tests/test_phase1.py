@@ -267,12 +267,22 @@ class TestPhase1Doctor(unittest.TestCase):
         package.write_bytes(b"fixture package")
         profile = profiles / "safe-runtime.files"
         profile.write_text("packages/python.pkg.tar.zst\n")
+        helper_dir = offline / "helper"
+        helper_dir.mkdir()
+        helper = helper_dir / "gpu-triage-vram-helper"
+        helper.write_bytes(b"fixture helper")
+        helper.chmod(0o755)
+        helper_sums = offline / "HELPER-SHA256SUMS"
+        helper_sums.write_text(
+            f"{hashlib.sha256(helper.read_bytes()).hexdigest()}  helper/{helper.name}\n"
+        )
         (offline / "manifest.env").write_text(f"EXPECTED_KERNEL='{os.uname().release}'\n")
         (offline / "SHA256SUMS").write_text(
             f"{hashlib.sha256(package.read_bytes()).hexdigest()}  packages/{package.name}\n"
         )
         (offline / "PROFILE-SHA256SUMS").write_text(
             f"{hashlib.sha256(profile.read_bytes()).hexdigest()}  profiles/{profile.name}\n"
+            f"{hashlib.sha256(helper_sums.read_bytes()).hexdigest()}  {helper_sums.name}\n"
         )
         arch_release = root / "arch-release"
         arch_release.write_text("Arch Linux\n")
@@ -284,6 +294,7 @@ class TestPhase1Doctor(unittest.TestCase):
         self.assertEqual({item["check"] for item in findings}, {
             "report_dir", "safe_runtime", "kernel_bundle", "SHA256SUMS",
             "PROFILE-SHA256SUMS", "safe_runtime_profile", "arch_iso",
+            "phase4_helper",
         })
 
 

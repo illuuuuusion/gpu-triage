@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from collectors import PciTarget, ReadOnlyCollector, Roots, default_run
+from vram_helper import find_helper, run_vram_helper
 
 
 CommandRunner = Callable[[list[str], float], dict[str, Any]]
 LegacyRunner = Callable[[str, int, Path, dict[str, Any]], dict[str, Any]]
+HelperRunner = Callable[..., dict[str, Any]]
 
 
 def _parse_int(value: str | None) -> int | None:
@@ -190,11 +192,15 @@ class DriverBoundCollector:
         *,
         which: Callable[[str], str | None] | None = None,
         legacy_runner: LegacyRunner | None = None,
+        helper_runner: HelperRunner | None = None,
+        repo_root: Path | None = None,
     ):
         self.roots = roots or Roots()
         self.run_command = run_command or default_run
         self.which = which or shutil.which
         self.legacy_runner = legacy_runner or self._default_legacy_runner
+        self.repo_root = repo_root
+        self.helper_runner = helper_runner
         self.readonly = ReadOnlyCollector(self.roots, self.run_command)
 
     @property
@@ -380,3 +386,44 @@ class DriverBoundCollector:
         ):
             return {"status": "UNAVAILABLE", "reason": "EXACT_DEVICE_MAPPING_NOT_PROVEN"}
         return self.legacy_runner(target.bdf, seconds, log_path, mapping)
+
+    def phase4_helper(
+        self,
+        target: PciTarget,
+        *,
+        seconds: int,
+        max_bytes: int,
+        max_error_records: int,
+        max_vram_percent: int,
+        max_temp_mc: int | None,
+        log_path: Path,
+    ) -> dict[str, Any]:
+        """Run the independently mapping native helper, never a legacy index."""
+        if self.helper_runner is not None:
+            return self.helper_runner(
+                target,
+                seconds=seconds,
+                max_bytes=max_bytes,
+                max_error_records=max_error_records,
+                max_vram_percent=max_vram_percent,
+                max_temp_mc=max_temp_mc,
+                log_path=log_path,
+            )
+        executable = find_helper(self.repo_root)
+        if not executable:
+            return {
+                "status": "UNAVAILABLE",
+                "kind": "PHASE4_HELPER",
+                "reason": "GPU_TRIAGE_VRAM_HELPER_NOT_FOUND",
+            }
+        return run_vram_helper(
+            target,
+            seconds=seconds,
+            max_bytes=max_bytes,
+            max_error_records=max_error_records,
+            max_vram_percent=max_vram_percent,
+            max_temp_mc=max_temp_mc,
+            log_path=log_path,
+            run_command=self.run_command,
+            executable=executable,
+        )

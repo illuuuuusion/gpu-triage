@@ -119,6 +119,14 @@ def run_doctor(
         profile_ok, profile_detail = _verify_sums(offline, profile_sums)
         findings.append({"status": "PASS" if profile_ok else "FAIL", "check": "PROFILE-SHA256SUMS", "detail": profile_detail})
         findings.append({"status": "PASS", "check": "safe_runtime_profile", "detail": str(profile)})
+        helper_sums = offline / "HELPER-SHA256SUMS"
+        helper = offline / "helper/gpu-triage-vram-helper"
+        helper_ok, helper_detail = _verify_sums(offline, helper_sums)
+        findings.append({
+            "status": "PASS" if helper_ok and helper.is_file() and os.access(helper, os.X_OK) else "FAIL",
+            "check": "phase4_helper",
+            "detail": helper_detail if helper_ok else f"native helper unavailable: {helper_detail}",
+        })
     else:
         excluded = (offline / "excluded.txt").read_text(errors="replace") if (offline / "excluded.txt").is_file() else ""
         provided = all(re.search(rf"^{name}\s", excluded, re.MULTILINE) for name in ("python", "pciutils"))
@@ -189,6 +197,10 @@ def run_pre_driver_triage(
     preflight_only: bool = False,
     no_vram: bool = False,
     vram_seconds: int = 60,
+    vram_max_bytes: int = 256 * 1024 * 1024,
+    vram_max_errors: int = 256,
+    vram_max_percent: int = 25,
+    vram_max_temp_mc: int | None = 95000,
 ) -> tuple[TriageReport, Path, Path]:
     """Run the state machine; the historical function name is API-compatible."""
     collector = collector or ReadOnlyCollector()
@@ -317,6 +329,8 @@ def run_pre_driver_triage(
             "telemetry": MatrixEntry(interactive_status, "Stage 1 performs no driver-interactive calls"),
             "vulkan": MatrixEntry(interactive_status, "Stage 1 performs no Vulkan enumeration"),
             "vbios_rom": MatrixEntry(Status.NOT_RUN, "ROM is a separate opt-in stage"),
+            "transfer_path": MatrixEntry(Status.NOT_RUN, "no driver-bound transfer workload"),
+            "gpu_local_copy": MatrixEntry(Status.NOT_RUN, "no driver-bound copy workload"),
             "vram_correctness": MatrixEntry(Status.NOT_RUN, "no safely initialized exact-mapped Vulkan device tested"),
             "compute": MatrixEntry(Status.NOT_RUN, "not part of safe preflight"),
             "physical_vram_package": MatrixEntry(Status.UNKNOWN, "no validated ASIC/board mapping"),
@@ -354,6 +368,8 @@ def run_pre_driver_triage(
                 )
                 report.matrix["telemetry"] = MatrixEntry(Status.NOT_RUN, "preflight-only requested")
                 report.matrix["vulkan"] = MatrixEntry(Status.NOT_RUN, "preflight-only requested")
+                report.matrix["transfer_path"] = MatrixEntry(Status.NOT_RUN, "preflight-only requested")
+                report.matrix["gpu_local_copy"] = MatrixEntry(Status.NOT_RUN, "preflight-only requested")
             report.overall = derive_overall(matrix, full_mode=False)
             report.stage = Stage.COMPLETE_INCOMPLETE
             report.stage_history.append(Stage.COMPLETE_INCOMPLETE)
@@ -375,7 +391,7 @@ def run_pre_driver_triage(
 
         target = _confirm_bound_target(collector, target)
         driver_collector = driver_collector or DriverBoundCollector(
-            roots=collector.roots, run_command=collector.run_command
+            roots=collector.roots, run_command=collector.run_command, repo_root=repo_root
         )
         telemetry_before = driver_collector.telemetry(target)
         vulkan = driver_collector.vulkan_identity(target)
@@ -398,47 +414,86 @@ def run_pre_driver_triage(
                 if vulkan.get("exact_match") else vulkan.get("reason", "mapping unavailable")
             ),
         )
-        report.matrix["compute"] = MatrixEntry(
-            Status.NOT_RUN, "independent compute isolation requires the Phase-4 helper"
-        )
+        report.matrix["transfer_path"] = MatrixEntry(Status.NOT_RUN, "pending Phase-4 helper")
+        report.matrix["gpu_local_copy"] = MatrixEntry(Status.NOT_RUN, "pending Phase-4 helper")
+        report.matrix["compute"] = MatrixEntry(Status.NOT_RUN, "pending Phase-4 helper")
 
         vram_log: Path | None = None
         if no_vram:
             vram = {"status": "NOT_RUN", "reason": "--no-vram requested"}
             report.matrix["vram_correctness"] = MatrixEntry(Status.NOT_RUN, "--no-vram requested")
-        elif not vulkan.get("exact_match"):
-            vram = {"status": "UNAVAILABLE", "reason": "EXACT_DEVICE_MAPPING_NOT_PROVEN"}
-            report.matrix["vram_correctness"] = MatrixEntry(
-                Status.UNAVAILABLE, "EXACT_DEVICE_MAPPING_NOT_PROVEN; no allocation started"
-            )
-        elif not vulkan.get("legacy_safe"):
-            vram = {"status": "BLOCKED", "reason": vulkan.get("legacy_reason")}
-            report.matrix["vram_correctness"] = MatrixEntry(
-                Status.BLOCKED, "LEGACY_DEVICE_INDEX_AMBIGUOUS; no allocation started"
-            )
+            report.matrix["transfer_path"] = MatrixEntry(Status.NOT_RUN, "--no-vram requested")
+            report.matrix["gpu_local_copy"] = MatrixEntry(Status.NOT_RUN, "--no-vram requested")
+            report.matrix["compute"] = MatrixEntry(Status.NOT_RUN, "--no-vram requested")
         else:
             target = _confirm_bound_target(collector, target)
             report.stage = Stage.S4_VRAM_COMPUTE
             report.stage_history.append(Stage.S4_VRAM_COMPUTE)
             report.matrix["vram_correctness"] = MatrixEntry(
-                Status.NOT_RUN, "legacy screen about to start after exact singleton mapping"
+                Status.NOT_RUN, "native helper about to perform its own exact BDF gate"
             )
             json_path, markdown_path = writer.checkpoint(report)
             vram_log = (
-                collector.roots.run / "gpu-triage-work" / f"{writer.stem}-memtest-vulkan.log"
+                collector.roots.run / "gpu-triage-work" / f"{writer.stem}-vram.jsonl"
             )
-            vram = driver_collector.legacy_memtest(target, vram_seconds, vram_log, vulkan)
-            vram_status = {
-                "PASS": Status.PASS,
+            vram = driver_collector.phase4_helper(
+                target,
+                seconds=vram_seconds,
+                max_bytes=vram_max_bytes,
+                max_error_records=vram_max_errors,
+                max_vram_percent=vram_max_percent,
+                max_temp_mc=vram_max_temp_mc,
+                log_path=vram_log,
+            )
+            helper_identity = vram.get("identity", {})
+            if helper_identity.get("exact_match"):
+                report.matrix["vulkan"] = MatrixEntry(
+                    Status.PASS,
+                    f"helper exact {helper_identity.get('mapping_source')} match at {target.bdf}",
+                )
+            experiment_rows = {
+                "host_transfer": "transfer_path",
+                "gpu_local_copy": "gpu_local_copy",
+                "compute_kat": "compute",
+                "vram_pattern": "vram_correctness",
+            }
+            experiments = vram.get("experiments", {})
+            fallback_status = {
                 "FAIL": Status.FAIL,
                 "INCONCLUSIVE": Status.INCONCLUSIVE,
                 "UNAVAILABLE": Status.UNAVAILABLE,
                 "BLOCKED": Status.BLOCKED,
             }.get(vram.get("status"), Status.INCONCLUSIVE)
-            report.matrix["vram_correctness"] = MatrixEntry(
-                vram_status,
-                "LEGACY_SCREEN" + (f": {vram.get('reason')}" if vram.get("reason") else ""),
-            )
+            for experiment, row in experiment_rows.items():
+                result = experiments.get(experiment)
+                if result:
+                    status = Status(result["status"])
+                    detail = (
+                        f"{result.get('comparisons', 0)} comparisons; "
+                        f"{result.get('errors', 0)} error(s)"
+                    )
+                else:
+                    status = fallback_status
+                    detail = vram.get("reason", "native helper produced no experiment result")
+                report.matrix[row] = MatrixEntry(status, detail)
+            if vram.get("error_summary", {}).get("total", 0):
+                report.observations.append({
+                    "level": "FAIL",
+                    "message": (
+                        f"Native helper observed {vram['error_summary']['total']} data mismatch(es); "
+                        "bounded word records and full aggregations are in JSON/VRAM sidecar."
+                    ),
+                })
+            if vram.get("temperature", {}).get("status") == "LIMIT_REACHED":
+                report.observations.append({
+                    "level": "WARN",
+                    "message": "The configured read-only temperature limit stopped the workload.",
+                })
+            if vram.get("device_lost"):
+                report.observations.append({
+                    "level": "FAIL",
+                    "message": "The Vulkan helper reported VK_ERROR_DEVICE_LOST; component attribution is inconclusive.",
+                })
 
         telemetry_after = driver_collector.telemetry(target)
         aer_after = collector.aer(bdf)
@@ -474,10 +529,12 @@ def run_pre_driver_triage(
             report.matrix["driver_init"] = MatrixEntry(
                 Status.FAIL, "new kernel failure signal(s): " + ", ".join(failure_signals)
             )
-            if "device_lost" in failure_signals and report.matrix["vram_correctness"].status is Status.PASS:
-                report.matrix["vram_correctness"] = MatrixEntry(
-                    Status.INCONCLUSIVE, "device lost signal prevents a VRAM-only verdict"
-                )
+            if "device_lost" in failure_signals:
+                for row in ("transfer_path", "gpu_local_copy", "vram_correctness", "compute"):
+                    if report.matrix[row].status is Status.PASS:
+                        report.matrix[row] = MatrixEntry(
+                            Status.INCONCLUSIVE, "device lost signal invalidates the workload verdict"
+                        )
 
         report.measurements["aer_after"] = aer_after
         report.measurements["aer_delta"] = aer_delta
@@ -521,23 +578,32 @@ def run_pre_driver_triage(
             kernel_after=kernel_after,
             vram_log=vram_log,
         )
-        legacy_completed = vram.get("kind") == "LEGACY_SCREEN"
+        helper_completed = vram.get("kind") == "PHASE4_HELPER" and bool(vram.get("experiments"))
         report.interpretation = [
             "The target remained on the vendor-expected driver; gpu-triage performed no module or binding action.",
             (
-                "Vulkan mapped exactly by full PCI/DRM identity."
-                if vulkan.get("exact_match") else
-                "Vulkan identity was not proven exactly; no legacy memory allocation was permitted."
+                "The native helper mapped the target exactly by full PCI/DRM identity before allocation."
+                if vram.get("identity", {}).get("exact_match") else
+                "The native helper did not prove exact identity; no attributable workload verdict is available."
             ),
             (
-                "Legacy memtest results are a screen of the combined memory path, not physical-package attribution."
-                if legacy_completed else
-                "No legacy memory workload completed with a safely attributable result."
+                "Host transfer, GPU-local copy, compute KAT and VRAM patterns were classified independently."
+                if helper_completed else
+                "No native Phase-4 workload completed with a safely attributable result."
             ),
             "Physical VRAM package remains UNKNOWN.",
         ]
-        report.overall = derive_overall(report.matrix, full_mode=False)
-        report.stage = Stage.COMPLETE_FAIL if report.overall is Overall.FAIL else Stage.COMPLETE_INCOMPLETE
+        required = {
+            "pci_enumeration", "target_identity", "pcie_link", "aer", "driver_init",
+            "vulkan", "transfer_path", "gpu_local_copy", "vram_correctness", "compute",
+        }
+        full_mode = not no_vram and helper_completed
+        report.overall = derive_overall(report.matrix, full_mode=full_mode, required=required)
+        report.stage = (
+            Stage.COMPLETE_PASS if report.overall is Overall.PASS else
+            Stage.COMPLETE_FAIL if report.overall is Overall.FAIL else
+            Stage.COMPLETE_INCOMPLETE
+        )
         report.stage_history.append(report.stage)
         json_path, markdown_path = writer.checkpoint(report)
         return report, json_path, markdown_path

@@ -7,4 +7,3 @@ vulkan-tools
 vulkan-radeon
 nvidia-open
 nvidia-utils
-memtest_vulkan

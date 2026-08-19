@@ -6,6 +6,7 @@ PKG_DIR="$REPO_ROOT/offline/packages"
 MANIFEST="$REPO_ROOT/offline/manifest.env"
 SUMS="$REPO_ROOT/offline/SHA256SUMS"
 PROFILE_SUMS="$REPO_ROOT/offline/PROFILE-SHA256SUMS"
+HELPER_SUMS="$REPO_ROOT/offline/HELPER-SHA256SUMS"
 
 PROFILE="safe-runtime"
 if [[ "${1:-}" == "--profile" ]]; then
@@ -38,6 +39,7 @@ bundle_id() {
     if [[ -f "$MANIFEST" ]]; then sha256sum < "$MANIFEST"; else printf 'no-manifest\n'; fi
     if [[ -f "$SUMS" ]]; then sha256sum < "$SUMS"; else printf 'no-sums\n'; fi
     if [[ -n "${PROFILE_SUMS:-}" && -f "$PROFILE_SUMS" ]]; then sha256sum < "$PROFILE_SUMS"; else printf 'no-profile-sums\n'; fi
+    if [[ -n "${HELPER_SUMS:-}" && -f "$HELPER_SUMS" ]]; then sha256sum < "$HELPER_SUMS"; else printf 'no-helper-sums\n'; fi
     printf 'profile=%s\n' "${PROFILE:-safe-runtime}"
     if [[ -n "${PROFILE_FILE:-}" && -f "$PROFILE_FILE" ]]; then sha256sum < "$PROFILE_FILE"; else printf 'no-profile\n'; fi
   } | sha256sum | awk '{print $1}'
@@ -109,6 +111,9 @@ log "Verifying offline bundle and runtime-profile hashes..."
 (cd "$REPO_ROOT/offline" && sha256sum -c SHA256SUMS --quiet) || die "Offline package checksum verification failed."
 if [[ $LEGACY_ALL_HASHED -eq 0 ]]; then
   (cd "$REPO_ROOT/offline" && sha256sum -c PROFILE-SHA256SUMS --quiet) || die "Runtime profile checksum verification failed."
+  [[ -f "$HELPER_SUMS" ]] || die "Native helper checksums are missing. Rebuild the Phase-4 bundle."
+  (cd "$REPO_ROOT/offline" && sha256sum -c HELPER-SHA256SUMS --quiet) || die "Native helper checksum verification failed."
+  [[ -x "$REPO_ROOT/offline/helper/gpu-triage-vram-helper" ]] || die "Native Phase-4 helper is missing or not executable."
 else
   log "Legacy driver-bound bundle: using the complete SHA256-covered union runtime."
 fi

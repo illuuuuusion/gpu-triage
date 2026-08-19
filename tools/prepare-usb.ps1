@@ -500,6 +500,7 @@ function Test-BundleComplete {
     $manifestPath = Join-Path $OfflinePath 'manifest.env'
     $sumsPath = Join-Path $OfflinePath 'SHA256SUMS'
     $profileSumsPath = Join-Path $OfflinePath 'PROFILE-SHA256SUMS'
+    $helperSumsPath = Join-Path $OfflinePath 'HELPER-SHA256SUMS'
 
     if (-not (Test-Path -LiteralPath $manifestPath)) { $Reason.Value = 'manifest.env missing'; return $false }
     if (-not (Test-Path -LiteralPath $sumsPath)) { $Reason.Value = 'SHA256SUMS missing'; return $false }
@@ -512,6 +513,24 @@ function Test-BundleComplete {
         ($presentProfiles.Count -ne $profileFiles.Count -or -not $hasProfileSums)) {
         $Reason.Value = 'runtime profile metadata is only partially present'
         return $false
+    }
+    if ($hasProfileSums) {
+        $helperPath = Join-Path $OfflinePath 'helper\gpu-triage-vram-helper'
+        $shaderPath = Join-Path $OfflinePath 'helper\shaders\pattern.spv'
+        if (-not (Test-Path -LiteralPath $helperSumsPath) -or
+            -not (Test-Path -LiteralPath $helperPath) -or
+            -not (Test-Path -LiteralPath $shaderPath)) {
+            $Reason.Value = 'native Phase-4 helper metadata or payload is missing'
+            return $false
+        }
+        $helperEntries = @(Get-SumsEntries $helperSumsPath)
+        $missingHelper = @($helperEntries | Where-Object {
+            -not (Test-Path -LiteralPath (Join-Path $OfflinePath $_))
+        })
+        if ($helperEntries.Count -lt 2 -or $missingHelper.Count -gt 0) {
+            $Reason.Value = 'native Phase-4 helper checksum set is incomplete'
+            return $false
+        }
     }
 
     $manifest = Read-Manifest $manifestPath

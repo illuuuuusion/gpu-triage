@@ -40,6 +40,8 @@ MANIFEST="$REPO_ROOT/offline/manifest.env"
 EXCLUDED="$REPO_ROOT/offline/excluded.txt"
 PROFILES_DIR="$REPO_ROOT/offline/profiles"
 PROFILE_SUMS="$REPO_ROOT/offline/PROFILE-SHA256SUMS"
+HELPER_DIR="$REPO_ROOT/offline/helper"
+HELPER_SUMS="$REPO_ROOT/offline/HELPER-SHA256SUMS"
 
 ISO_PATH=""
 ISO_SUBTRACT=1
@@ -94,6 +96,9 @@ fi
 
 command -v pacman >/dev/null 2>&1 || die "Run this on Arch Linux (or in an archlinux container)."
 command -v bsdtar >/dev/null 2>&1 || die "bsdtar is required (package: libarchive)."
+command -v make >/dev/null 2>&1 || die "make is required to build the native Phase-4 helper."
+command -v cc >/dev/null 2>&1 || die "a C17 compiler is required to build the native Phase-4 helper."
+command -v glslangValidator >/dev/null 2>&1 || die "glslangValidator is required for reproducible SPIR-V."
 
 mapfile -t TARGETS < <(grep -Ev '^\s*(#|$)' "$LIST_FILE")
 mapfile -t SAFE_TARGETS < <(grep -Ev '^\s*(#|$)' "$SAFE_LIST_FILE")
@@ -230,6 +235,12 @@ bundle_split_closure "$TMP/driver-closure.txt" ISO_PKGS "$ISO_SUBTRACT" "$TMP/dr
 awk -F '\t' 'NF >= 4 { print "packages/" $4 }' "$TMP/driver-keep.txt" | sed 's/:/_/g' | sort -u > "$PROFILES_DIR/driver-bound-runtime.files"
 
 # --- assemble the bundle --------------------------------------------------
+log "Building the version-bound C17 Vulkan helper and SPIR-V..."
+make -C "$REPO_ROOT/vram-helper" clean all OUT_DIR="$HELPER_DIR"
+"$HELPER_DIR/gpu-triage-vram-helper" --self-test > "$TMP/helper-self-test.jsonl"
+grep -q '"type":"summary"' "$TMP/helper-self-test.jsonl" \
+  || die "Native helper self-test did not emit a summary."
+
 log "Copying $KEEP_COUNT package(s) to $PKG_DIR..."
 declare -A SEEN_FILES=()
 RENAMED=0
@@ -270,7 +281,8 @@ MANIFEST
 (
   cd "$REPO_ROOT/offline"
   find packages -maxdepth 1 -type f -name '*.pkg.tar.zst' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
-  sha256sum manifest.env profiles/safe-runtime.files profiles/driver-bound-runtime.files > PROFILE-SHA256SUMS
+  find helper -type f -print0 | sort -z | xargs -0 sha256sum > HELPER-SHA256SUMS
+  sha256sum manifest.env profiles/safe-runtime.files profiles/driver-bound-runtime.files HELPER-SHA256SUMS > PROFILE-SHA256SUMS
 )
 
 BUNDLE_SIZE="$(du -sh "$PKG_DIR" | awk '{print $1}')"
@@ -285,7 +297,7 @@ if [[ $WRITE_DIST -eq 1 ]]; then
   (
     cd "$REPO_ROOT/offline"
     bsdtar --format zip --options zip:compression=store \
-           -cf "$DIST_DIR/$ZIP_NAME" packages profiles manifest.env SHA256SUMS PROFILE-SHA256SUMS excluded.txt
+           -cf "$DIST_DIR/$ZIP_NAME" packages profiles helper manifest.env SHA256SUMS HELPER-SHA256SUMS PROFILE-SHA256SUMS excluded.txt
   )
   (
     cd "$DIST_DIR"
@@ -301,6 +313,7 @@ fi
 if [[ -n "$OWNER" ]]; then
   chown -R "$OWNER" "$PKG_DIR" "$DL_CACHE" "$MANIFEST" "$EXCLUDED" \
         "$REPO_ROOT/offline/SHA256SUMS" "$PROFILE_SUMS" "$PROFILES_DIR" 2>/dev/null || true
+  chown -R "$OWNER" "$HELPER_DIR" "$HELPER_SUMS" 2>/dev/null || true
   [[ -d "$DIST_DIR" ]] && chown -R "$OWNER" "$DIST_DIR" 2>/dev/null || true
 fi
 

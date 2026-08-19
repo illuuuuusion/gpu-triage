@@ -79,7 +79,12 @@ class TriageReport:
         return asdict(self)
 
 
-def derive_overall(matrix: dict[str, MatrixEntry], *, full_mode: bool) -> Overall:
+def derive_overall(
+    matrix: dict[str, MatrixEntry],
+    *,
+    full_mode: bool,
+    required: set[str] | None = None,
+) -> Overall:
     """Apply the three-value overall contract.
 
     A clear negative result wins.  PASS is reserved for a future full-mode run
@@ -87,6 +92,11 @@ def derive_overall(matrix: dict[str, MatrixEntry], *, full_mode: bool) -> Overal
     """
     if any(item.status is Status.FAIL for item in matrix.values()):
         return Overall.FAIL
-    if full_mode and matrix and all(item.status is Status.PASS for item in matrix.values()):
+    required_entries = (
+        [matrix[name] for name in sorted(required)]
+        if required is not None and required <= matrix.keys()
+        else list(matrix.values())
+    )
+    if full_mode and required_entries and all(item.status is Status.PASS for item in required_entries):
         return Overall.PASS
     return Overall.INCOMPLETE

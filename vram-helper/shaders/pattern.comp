@@ -1,0 +1,38 @@
+#version 450
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) buffer Output { uint words_out[]; };
+layout(push_constant) uniform Params {
+    uint words;
+    uint pattern;
+    uint seed;
+    uint stride;
+} p;
+
+uint hash32(uint value) {
+    value ^= value >> 16;
+    value *= 0x7feb352d;
+    value ^= value >> 15;
+    value *= 0x846ca68b;
+    return value ^ (value >> 16);
+}
+
+uint pattern_value(uint pattern, uint index, uint seed) {
+    if (pattern == 0) return 0u;
+    if (pattern == 1) return 0xffffffffu;
+    if (pattern == 2) return 0xaaaaaaaau;
+    if (pattern == 3) return 0x55555555u;
+    if (pattern == 4) return 1u << (seed & 31u);
+    if (pattern == 5) return ~(1u << (seed & 31u));
+    if (pattern == 6) return (index * 4u) ^ seed;
+    if (pattern == 7) return ~((index * 4u) ^ seed);
+    if (pattern == 8) return hash32(index ^ seed);
+    return (index * 1664525u + 1013904223u) ^ seed;
+}
+
+void main() {
+    uint logical = gl_GlobalInvocationID.x;
+    if (logical >= p.words) return;
+    uint physical = (logical * p.stride) % p.words;
+    words_out[physical] = pattern_value(p.pattern, logical, p.seed);
+}

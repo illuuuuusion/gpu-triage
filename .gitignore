@@ -9,6 +9,8 @@ offline/manifest.env
 offline/excluded.txt
 offline/PROFILE-SHA256SUMS
 offline/profiles/*.files
+offline/helper/
+offline/HELPER-SHA256SUMS
 offline/dist/
 offline/.dlcache/
 
@@ -20,3 +22,4 @@ reports/*
 .cache/
 .tmp/
 *.iso
+vram-helper/build/

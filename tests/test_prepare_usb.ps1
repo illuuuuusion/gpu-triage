@@ -114,9 +114,22 @@ try {
     "packages/$PackageName" | Set-Content -LiteralPath (Join-Path $BundleProfiles 'driver-bound-runtime.files') -Encoding ASCII
     $safeProfileSha = (Get-FileHash -LiteralPath (Join-Path $BundleProfiles 'safe-runtime.files') -Algorithm SHA256).Hash.ToLowerInvariant()
     $driverProfileSha = (Get-FileHash -LiteralPath (Join-Path $BundleProfiles 'driver-bound-runtime.files') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $BundleHelper = Join-Path $BundleSource 'helper'
+    $BundleShaders = Join-Path $BundleHelper 'shaders'
+    New-Item -ItemType Directory -Force -Path $BundleShaders | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $BundleHelper 'gpu-triage-vram-helper'), 'synthetic helper', [Text.Encoding]::ASCII)
+    [System.IO.File]::WriteAllText((Join-Path $BundleShaders 'pattern.spv'), 'synthetic spirv', [Text.Encoding]::ASCII)
+    $helperSha = (Get-FileHash -LiteralPath (Join-Path $BundleHelper 'gpu-triage-vram-helper') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $shaderSha = (Get-FileHash -LiteralPath (Join-Path $BundleShaders 'pattern.spv') -Algorithm SHA256).Hash.ToLowerInvariant()
+    @(
+        "$helperSha  helper/gpu-triage-vram-helper"
+        "$shaderSha  helper/shaders/pattern.spv"
+    ) | Set-Content -LiteralPath (Join-Path $BundleSource 'HELPER-SHA256SUMS') -Encoding ASCII
+    $helperSumsSha = (Get-FileHash -LiteralPath (Join-Path $BundleSource 'HELPER-SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
     @(
         "$safeProfileSha  profiles/safe-runtime.files"
         "$driverProfileSha  profiles/driver-bound-runtime.files"
+        "$helperSumsSha  HELPER-SHA256SUMS"
     ) | Set-Content -LiteralPath (Join-Path $BundleSource 'PROFILE-SHA256SUMS') -Encoding ASCII
     'base 1.0-1' | Set-Content -LiteralPath (Join-Path $BundleSource 'excluded.txt') -Encoding ASCII
     Add-Type -AssemblyName System.IO.Compression.FileSystem

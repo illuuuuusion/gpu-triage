@@ -114,6 +114,14 @@ def markdown_report(report: TriageReport) -> str:
     legacy_screen_ran = (
         report.measurements.get("driver_bound", {}).get("vram", {}).get("kind") == "LEGACY_SCREEN"
     )
+    phase4_ran = (
+        report.measurements.get("driver_bound", {}).get("vram", {}).get("kind") == "PHASE4_HELPER"
+        and bool(report.measurements.get("driver_bound", {}).get("vram", {}).get("experiments"))
+    )
+    helper = report.measurements.get("driver_bound", {}).get("vram", {})
+    error_summary = helper.get("error_summary", {})
+    helper_limits = helper.get("limits", {})
+    reproducible = error_summary.get("reproducible", {})
     lines = [
         "# GPU-TRIAGE REPORT",
         "",
@@ -150,6 +158,8 @@ def markdown_report(report: TriageReport) -> str:
         "telemetry": "Telemetry",
         "vulkan": "Vulkan",
         "vbios_rom": "VBIOS ROM",
+        "transfer_path": "PCIe / host transfer",
+        "gpu_local_copy": "GPU-local copy",
         "vram_correctness": "VRAM correctness",
         "compute": "Compute",
         "physical_vram_package": "Physical VRAM package",
@@ -172,6 +182,16 @@ def markdown_report(report: TriageReport) -> str:
         f"- pstore: {'available' if report.measurements.get('pstore', {}).get('available') else 'unavailable/not collected'}",
         f"- Telemetry backend: {_one_line(report.measurements.get('driver_bound', {}).get('telemetry_after', {}).get('backend') or 'not run')}",
         f"- Vulkan mapping: {_one_line(report.measurements.get('driver_bound', {}).get('vulkan', {}).get('mapping_source') or 'not proven')}",
+        f"- Native workload bytes: {_one_line(helper_limits.get('bytes') or 'not run')}",
+        f"- Data mismatches: {_one_line(error_summary.get('total') if error_summary else 'not run')} "
+        f"(recorded {_one_line(error_summary.get('recorded') if error_summary else 'not run')})",
+        f"- Error offsets: {_one_line(error_summary.get('first_offset') if error_summary else 'n/a')} .. "
+        f"{_one_line(error_summary.get('last_offset') if error_summary else 'n/a')}; "
+        f"clusters={_one_line(error_summary.get('clusters_64b') if error_summary else 'n/a')}; "
+        f"stride={_one_line(error_summary.get('stride_candidate_bytes') if error_summary else 'n/a')}",
+        f"- Reproducible offsets: reread={_one_line(reproducible.get('reread') if reproducible else 'n/a')}, "
+        f"pass={_one_line(reproducible.get('pass') if reproducible else 'n/a')}, "
+        f"allocation={_one_line(reproducible.get('allocation') if reproducible else 'n/a')}",
         "",
         "## Observations",
         "",
@@ -224,6 +244,8 @@ def markdown_report(report: TriageReport) -> str:
             "- Driver-bound telemetry, Vulkan and VRAM were not performed in this pre-driver run."
         ),
         (
+            "- The native helper separated host transfer, GPU-local copy, compute KAT and VRAM-pattern evidence."
+            if phase4_ran else
             "- memtest_vulkan was used only as a legacy screen; it does not isolate VRAM, PCIe, compute or controller faults."
             if legacy_screen_ran else
             "- No VRAM correctness workload ran."
@@ -442,7 +464,7 @@ def write_driver_sidecars(
     kernel_after: dict[str, Any],
     vram_log: Path | None = None,
 ) -> dict[str, str]:
-    """Persist a bounded before/after kernel window and the legacy VRAM log."""
+    """Persist a bounded before/after kernel window and workload JSONL/log."""
     kernel_name = sidecars.get("kernel", f"{writer.stem}-kernel.log")
     heading_bytes = 96
     per_snapshot = (MAX_KERNEL_SIDECAR_BYTES - heading_bytes) // 2
@@ -469,10 +491,11 @@ def write_driver_sidecars(
         except OSError:
             content = b""
         if content:
-            name = f"{writer.stem}-memtest-vulkan.log"
+            is_jsonl = vram_log.suffix == ".jsonl"
+            name = f"{writer.stem}-vram.jsonl" if is_jsonl else f"{writer.stem}-memtest-vulkan.log"
             writer.artifact(
                 Path(name),
                 _bounded_bytes(content, MAX_KERNEL_SIDECAR_BYTES, "VRAM sidecar"),
             )
-            sidecars["vram_legacy"] = name
+            sidecars["vram" if is_jsonl else "vram_legacy"] = name
     return sidecars

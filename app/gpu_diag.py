@@ -978,6 +978,10 @@ def run_safe_cli(args: argparse.Namespace) -> int:
             preflight_only=args.preflight_only,
             no_vram=args.no_vram,
             vram_seconds=args.vram_seconds,
+            vram_max_bytes=args.vram_max_mib * 1024 * 1024,
+            vram_max_errors=args.vram_max_errors,
+            vram_max_percent=args.vram_max_percent,
+            vram_max_temp_mc=None if args.vram_max_temp_c is None else args.vram_max_temp_c * 1000,
         )
     except SafeTriageError as exc:
         raise DiagError(str(exc)) from exc
@@ -1016,7 +1020,11 @@ def build_parser() -> argparse.ArgumentParser:
         q.add_argument("--gpu", required=True, help="exact target PCI BDF, e.g. 0000:03:00.0")
         q.add_argument("--preflight-only", action="store_true", help="stop after read-only Stage 1")
         q.add_argument("--rom", action="store_true", help="reserved explicit ROM opt-in (not enabled yet)")
-        q.add_argument("--vram-seconds", type=int, default=60, help="duration of the strictly gated legacy VRAM screen")
+        q.add_argument("--vram-seconds", type=int, default=60, help="maximum native helper runtime")
+        q.add_argument("--vram-max-mib", type=int, default=256, help="maximum device-local bytes in MiB")
+        q.add_argument("--vram-max-errors", type=int, default=256, help="maximum structured error records")
+        q.add_argument("--vram-max-percent", type=int, default=25, help="maximum combined share of a device-local heap")
+        q.add_argument("--vram-max-temp-c", type=int, default=95, help="read-only temperature stop limit; 0 disables")
         q.add_argument("--no-vram", action="store_true", help="collect driver-bound evidence without VRAM load")
         q.add_argument("--report-dir", help="explicit atomically writable report directory")
     return p
@@ -1035,6 +1043,16 @@ def main() -> int:
         if args.command in ("quick", "triage"):
             if args.vram_seconds < 5 or args.vram_seconds > 3600:
                 raise DiagError("--vram-seconds must be between 5 and 3600")
+            if args.vram_max_mib < 1 or args.vram_max_mib > 16384:
+                raise DiagError("--vram-max-mib must be between 1 and 16384")
+            if args.vram_max_errors < 1 or args.vram_max_errors > 65536:
+                raise DiagError("--vram-max-errors must be between 1 and 65536")
+            if args.vram_max_percent < 1 or args.vram_max_percent > 50:
+                raise DiagError("--vram-max-percent must be between 1 and 50")
+            if args.vram_max_temp_c == 0:
+                args.vram_max_temp_c = None
+            elif args.vram_max_temp_c < 40 or args.vram_max_temp_c > 125:
+                raise DiagError("--vram-max-temp-c must be 0 or between 40 and 125")
             if args.command == "quick":
                 print("WARNING: 'quick' is deprecated; running adaptive safe 'triage'.", file=sys.stderr)
             return run_safe_cli(args)

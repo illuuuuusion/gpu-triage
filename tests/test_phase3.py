@@ -84,14 +84,27 @@ class BoundFixture(Fixture):
             output, rc = "", 0
         return {"cmd": cmd, "rc": rc, "output": output, "seconds": 0.0}
 
-    def driver_collector(self, legacy_runner=None) -> DriverBoundCollector:
+    def driver_collector(self, legacy_runner=None, helper_runner=None) -> DriverBoundCollector:
         roots = self.collector().roots
         return DriverBoundCollector(
             roots,
             self.command,
             which=lambda name: f"/usr/bin/{name}",
             legacy_runner=legacy_runner,
+            helper_runner=helper_runner,
         )
+
+
+def phase4_result(status="PASS", *, reason=None):
+    experiments = {
+        name: {"status": status, "comparisons": 1024, "errors": 0}
+        for name in ("host_transfer", "gpu_local_copy", "compute_kat", "vram_pattern")
+    }
+    return {
+        "status": status, "kind": "PHASE4_HELPER", "reason": reason,
+        "identity": {"exact_match": True, "mapping_source": "VK_EXT_pci_bus_info"},
+        "experiments": experiments,
+    }
 
 
 class Phase3Case(unittest.TestCase):
@@ -113,7 +126,7 @@ class Phase3Case(unittest.TestCase):
 
 
 class TestAmdBoundFlow(Phase3Case):
-    def test_exact_mapping_telemetry_ras_and_legacy_gate(self):
+    def test_exact_mapping_telemetry_ras_and_native_helper(self):
         dev = self.fixture.add_gpu(driver="amdgpu")
         hwmon = dev / "hwmon/hwmon0"
         hwmon.mkdir(parents=True)
@@ -127,18 +140,19 @@ class TestAmdBoundFlow(Phase3Case):
         )
         calls: list[tuple[str, int]] = []
 
-        def legacy(bdf, seconds, log_path, mapping):
-            calls.append((bdf, mapping["index"]))
+        def helper(target, **kwargs):
+            calls.append((target.bdf, kwargs["seconds"]))
+            log_path = kwargs["log_path"]
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.write_text("fixture legacy PASS\n")
+            log_path.write_text('{"type":"fixture"}\n')
             (dev / "aer_dev_correctable").write_text("BadTLP 1\n")
-            return {"status": "PASS", "kind": "LEGACY_SCREEN", "reason": None}
+            return phase4_result()
 
         report, json_path, markdown_path = self.triage(
-            driver_collector=self.fixture.driver_collector(legacy)
+            driver_collector=self.fixture.driver_collector(helper_runner=helper)
         )
 
-        self.assertEqual(calls, [("0000:03:00.0", 0)])
+        self.assertEqual(calls, [("0000:03:00.0", 5)])
         self.assertEqual([stage.value for stage in report.stage_history], [
             "START", "S0_ENVIRONMENT", "S1_PRE_DRIVER", "S3_DRIVER_BOUND",
             "S4_VRAM_COMPUTE", "COMPLETE_INCOMPLETE",
@@ -152,9 +166,9 @@ class TestAmdBoundFlow(Phase3Case):
             "VK_EXT_pci_bus_info",
         )
         self.assertIn("umc_err_count", report.measurements["driver_bound"]["telemetry_after"]["ras"])
-        self.assertIn("vram_legacy", report.sidecars)
-        self.assertTrue((json_path.parent / report.sidecars["vram_legacy"]).is_file())
-        self.assertIn("legacy screen", markdown_path.read_text())
+        self.assertIn("vram", report.sidecars)
+        self.assertTrue((json_path.parent / report.sidecars["vram"]).is_file())
+        self.assertIn("native helper", markdown_path.read_text())
         self.assertEqual(json.loads(json_path.read_text())["overall"], "INCOMPLETE")
 
     def test_missing_telemetry_does_not_block_exact_vulkan_mapping(self):
@@ -169,13 +183,14 @@ class TestAmdBoundFlow(Phase3Case):
         dev = self.fixture.add_gpu(driver="amdgpu")
         self.fixture.vulkan_output = "Device Properties and Extensions:\n" + vulkan_device()
 
-        def legacy(_bdf, _seconds, log_path, _mapping):
+        def helper(_target, **kwargs):
+            log_path = kwargs["log_path"]
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text("fixture\n")
             (dev.parent / "aer_dev_nonfatal").write_text("Completion Timeout 1\n")
-            return {"status": "PASS", "kind": "LEGACY_SCREEN"}
+            return phase4_result()
 
-        report, _, _ = self.triage(driver_collector=self.fixture.driver_collector(legacy))
+        report, _, _ = self.triage(driver_collector=self.fixture.driver_collector(helper_runner=helper))
         self.assertEqual(report.matrix["aer"].status.value, "FAIL")
         self.assertEqual(report.overall.value, "FAIL")
         self.assertEqual(
@@ -186,15 +201,13 @@ class TestAmdBoundFlow(Phase3Case):
         self.fixture.add_gpu(driver="amdgpu")
         self.fixture.vulkan_output = "Device Properties and Extensions:\n" + vulkan_device()
 
-        def legacy(_bdf, _seconds, log_path, _mapping):
+        def helper(_target, **kwargs):
+            log_path = kwargs["log_path"]
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text("VK_ERROR_DEVICE_LOST\n")
-            return {
-                "status": "INCONCLUSIVE", "kind": "LEGACY_SCREEN",
-                "reason": "VULKAN_DEVICE_LOST",
-            }
+            return phase4_result("INCONCLUSIVE", reason="VULKAN_DEVICE_LOST")
 
-        report, _, _ = self.triage(driver_collector=self.fixture.driver_collector(legacy))
+        report, _, _ = self.triage(driver_collector=self.fixture.driver_collector(helper_runner=helper))
         self.assertEqual(report.matrix["vram_correctness"].status.value, "INCONCLUSIVE")
         self.assertNotEqual(report.overall.value, "FAIL")
 
@@ -246,7 +259,7 @@ class TestVulkanIsolation(Phase3Case):
         self.assertTrue(mapping["exact_match"])
         self.assertEqual(mapping["mapping_source"], "VK_EXT_physical_device_drm")
 
-    def test_second_hardware_device_blocks_legacy_memtest(self):
+    def test_second_hardware_device_does_not_enable_legacy_memtest(self):
         self.fixture.add_gpu(driver="amdgpu")
         self.fixture.vulkan_output = (
             "Device Properties and Extensions:\n"
@@ -262,8 +275,8 @@ class TestVulkanIsolation(Phase3Case):
         report, _, _ = self.triage(driver_collector=self.fixture.driver_collector(legacy))
         self.assertEqual(calls, [])
         self.assertEqual(report.matrix["vulkan"].status.value, "PASS")
-        self.assertEqual(report.matrix["vram_correctness"].status.value, "BLOCKED")
-        self.assertNotIn("S4_VRAM_COMPUTE", [stage.value for stage in report.stage_history])
+        self.assertEqual(report.matrix["vram_correctness"].status.value, "UNAVAILABLE")
+        self.assertIn("S4_VRAM_COMPUTE", [stage.value for stage in report.stage_history])
 
 
 class TestNvidiaAndSafety(Phase3Case):
@@ -326,11 +339,11 @@ class TestPhase3Checkpoints(Phase3Case):
         self.assertEqual(parsed["stage_history"][-2:], ["S3_DRIVER_BOUND", "ABORTED"])
 
     def test_stage4_workload_failure_leaves_aborted_checkpoint(self):
-        def legacy(*_args):
+        def helper(*_args, **_kwargs):
             raise OSError("stage4 fixture failure")
 
         with self.assertRaisesRegex(SafeTriageError, "stage4 fixture failure"):
-            self.triage(driver_collector=self.fixture.driver_collector(legacy))
+            self.triage(driver_collector=self.fixture.driver_collector(helper_runner=helper))
         checkpoint = next((self.root / "reports").glob("*.json"))
         parsed = json.loads(checkpoint.read_text())
         self.assertEqual(parsed["stage"], "ABORTED")

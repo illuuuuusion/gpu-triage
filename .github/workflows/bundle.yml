@@ -117,7 +117,7 @@ jobs:
             -w /repo \
             -e GPU_TRIAGE_OWNER="$(id -u):$(id -g)" \
             archlinux:latest \
-            bash offline/build_bundle.sh "/iso/$ISO_NAME"
+            bash -lc 'pacman -Syu --noconfirm --needed base-devel vulkan-headers vulkan-icd-loader glslang && offline/build_bundle.sh "/iso/$ISO_NAME"'
 
       - name: Artefakt pruefen
         run: |
@@ -132,8 +132,11 @@ jobs:
           cd "$RUNNER_TEMP/unpacked"
           sha256sum -c SHA256SUMS --quiet
           sha256sum -c PROFILE-SHA256SUMS --quiet
+          sha256sum -c HELPER-SHA256SUMS --quiet
           test -f profiles/safe-runtime.files
           test -f profiles/driver-bound-runtime.files
+          test -x helper/gpu-triage-vram-helper
+          helper/gpu-triage-vram-helper --self-test >/dev/null
           grep -q "ARCHISO_DATE='$ISO_DATE'" manifest.env
           echo "Verified $(wc -l < SHA256SUMS) packages against SHA256SUMS."
           cat manifest.env
