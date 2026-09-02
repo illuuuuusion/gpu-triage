@@ -1,0 +1,56 @@
+name: Letztes Run-Log ins Repo schreiben
+
+# Writes the complete log of the last "Offline-Bundle bauen" run to
+# .github/last-run.log and commits it, overwriting the previous one. Point an
+# AI (or yourself) at that file instead of copying logs out of the web UI.
+#
+# Runs *after* the build finishes, so the log is complete — a step inside the
+# build job could never capture its own output.
+
+on:
+  workflow_run:
+    workflows: ["Offline-Bundle bauen"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: last-run-log
+  cancel-in-progress: false
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log holen und committen
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_NAME: ${{ github.event.workflow_run.name }}
+          RUN_TIME: ${{ github.event.workflow_run.updated_at }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          {
+            echo "Workflow : $RUN_NAME"
+            echo "Run      : $RUN_URL"
+            echo "Ergebnis : $CONCLUSION"
+            echo "Zeit     : $RUN_TIME"
+            echo "Commit   : $RUN_SHA"
+            echo
+          } > .github/last-run.log
+          # Logs of a cancelled or expired run can be gone; the header above is
+          # then still worth committing.
+          gh run view "$RUN_ID" --log >> .github/last-run.log \
+            || echo "(Log nicht abrufbar — siehe $RUN_URL)" >> .github/last-run.log
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/last-run.log
+          git diff --cached --quiet && { echo "Log unveraendert."; exit 0; }
+          git commit -m "Log des letzten Bundle-Runs ($CONCLUSION)"
+          git push
