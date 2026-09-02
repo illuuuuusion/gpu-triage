@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700 /* realpath(): glibc guards it with __USE_XOPEN_EXTENDED, not _POSIX_C_SOURCE */
 
 #include "analysis.h"
 
@@ -345,7 +345,8 @@ static const char *default_shader(char path[PATH_MAX]) {
     char exe[PATH_MAX]; ssize_t length = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
     if (length <= 0) return NULL;
     exe[length] = 0; char *slash = strrchr(exe, '/'); if (!slash) return NULL; *slash = 0;
-    snprintf(path, PATH_MAX, "%s/shaders/pattern.spv", exe); return path;
+    if (snprintf(path, PATH_MAX, "%s/shaders/pattern.spv", exe) >= PATH_MAX) return NULL;
+    return path;
 }
 
 static bool setup_vulkan(vk_state *v, const options *o) {
@@ -531,12 +532,14 @@ static int64_t read_temperature(const options *o) {
     struct dirent *entry; int64_t maximum = -1;
     while ((entry = readdir(dir))) {
         if (strncmp(entry->d_name, "hwmon", 5)) continue;
-        char hwmon[PATH_MAX]; snprintf(hwmon, sizeof(hwmon), "%s/%s", root, entry->d_name);
+        char hwmon[PATH_MAX];
+        if (snprintf(hwmon, sizeof(hwmon), "%s/%s", root, entry->d_name) >= (int)sizeof(hwmon)) continue;
         DIR *sensors = opendir(hwmon); if (!sensors) continue;
         struct dirent *sensor;
         while ((sensor = readdir(sensors))) {
             if (strncmp(sensor->d_name, "temp", 4) || !strstr(sensor->d_name, "_input")) continue;
-            char path[PATH_MAX]; snprintf(path, sizeof(path), "%s/%s", hwmon, sensor->d_name);
+            char path[PATH_MAX];
+            if (snprintf(path, sizeof(path), "%s/%s", hwmon, sensor->d_name) >= (int)sizeof(path)) continue;
             FILE *file = fopen(path, "r"); long long value;
             if (file && fscanf(file, "%lld", &value) == 1 && value > maximum) maximum = value;
             if (file) fclose(file);
