@@ -116,6 +116,7 @@ jobs:
             -v "$RUNNER_TEMP/iso":/iso:ro \
             -w /repo \
             -e GPU_TRIAGE_OWNER="$(id -u):$(id -g)" \
+            -e ISO_NAME \
             archlinux:latest \
             bash -lc 'pacman -Syu --noconfirm --needed base-devel vulkan-headers vulkan-icd-loader glslang && offline/build_bundle.sh "/iso/$ISO_NAME"'
 
