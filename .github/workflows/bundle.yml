@@ -129,7 +129,9 @@ jobs:
           # "a bundle from the release behaves like a locally built one" that
           # can be proven without booting a machine.
           mkdir -p "$RUNNER_TEMP/unpacked"
-          python3 -m zipfile -e "$ZIP" "$RUNNER_TEMP/unpacked"
+          # unzip, not "python3 -m zipfile": zipfile drops the Unix mode bits,
+          # so the helper would come out non-executable and test -x below fails.
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/unpacked"
           cd "$RUNNER_TEMP/unpacked"
           sha256sum -c SHA256SUMS --quiet
           sha256sum -c PROFILE-SHA256SUMS --quiet
