@@ -1,19 +1,19 @@
 {
   "schema": 1,
-  "generated": "2026-09-02T18:55:05Z",
-  "iso_date": "2026.09.01",
-  "iso_name": "archlinux-2026.09.01-x86_64.iso",
-  "iso_sha256": "be8458032f8105e60ee2a3067f950b6e3c007ee51b38dac50e8b48e765561c91",
-  "iso_size": 1608286208,
+  "generated": "2026-11-02T15:26:33Z",
+  "iso_date": "2026.11.01",
+  "iso_name": "archlinux-2026.11.01-x86_64.iso",
+  "iso_sha256": "01bcdcf01af2f7d58f2794899c834770d25c9bfc945bd092b32bb66672a4a216",
+  "iso_size": 1317568512,
   "iso_urls": [
-    "https://geo.mirror.pkgbuild.com/iso/2026.09.01/archlinux-2026.09.01-x86_64.iso",
-    "https://archive.archlinux.org/iso/2026.09.01/archlinux-2026.09.01-x86_64.iso"
+    "https://geo.mirror.pkgbuild.com/iso/2026.11.01/archlinux-2026.11.01-x86_64.iso",
+    "https://archive.archlinux.org/iso/2026.11.01/archlinux-2026.11.01-x86_64.iso"
   ],
-  "expected_kernel": "7.2.2-arch1-1",
-  "release_tag": "bundle-2026.09.01",
-  "bundle_name": "gpu-triage-bundle-2026.09.01.zip",
-  "bundle_url": "https://github.com/illuuuuusion/gpu-triage/releases/download/bundle-2026.09.01/gpu-triage-bundle-2026.09.01.zip",
-  "bundle_sha256": "5413f4f34a76e9b04d0457cbaa976830c9c76e4102203b209ca21ce6f4ef197a",
-  "bundle_size": 390177431,
+  "expected_kernel": "7.2.11-arch1-1",
+  "release_tag": "bundle-2026.11.01",
+  "bundle_name": "gpu-triage-bundle-2026.11.01.zip",
+  "bundle_url": "https://github.com/illuuuuusion/gpu-triage/releases/download/bundle-2026.11.01/gpu-triage-bundle-2026.11.01.zip",
+  "bundle_sha256": "15fac69a954c3d72e67c454894391371ddd1e44adfc44b616466a5ce933df5c6",
+  "bundle_size": 405848490,
   "bundle_packages": 24
 }
